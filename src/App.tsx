@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
-  PieChart, Pie, Cell
+  PieChart, Pie, Cell, BarChart, Bar
 } from 'recharts';
 import { 
   TrendingUp, 
@@ -40,15 +40,55 @@ interface MarketData {
   portfolio: number;
 }
 
+interface HistoricalAnalysis {
+  id: string;
+  ticker: string;
+  date: string;
+  summary: string;
+  analysis: string;
+  context?: string;
+}
+
+interface StockAlert {
+  id: string;
+  ticker: string;
+  type: 'price' | 'variation' | 'news';
+  value?: number;
+  condition?: 'above' | 'below';
+  keywords?: string;
+  sources?: string;
+  active: boolean;
+  createdAt: string;
+}
+
 export default function App() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [marketData, setMarketData] = useState<MarketData[]>([]);
   const [isRegistering, setIsRegistering] = useState(false);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'analysis'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'analysis' | 'alerts'>('dashboard');
   const [selectedTicker, setSelectedTicker] = useState('');
   const [userContext, setUserContext] = useState('');
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisHistory, setAnalysisHistory] = useState<HistoricalAnalysis[]>([]);
+  const [alerts, setAlerts] = useState<StockAlert[]>([]);
+  const [isAddingAlert, setIsAddingAlert] = useState(false);
+  const [isFetchingAlertNews, setIsFetchingAlertNews] = useState<string | null>(null);
+  const [alertNews, setAlertNews] = useState<{ [id: string]: string }>({});
+  const [alertForm, setAlertForm] = useState<Omit<StockAlert, 'id' | 'createdAt' | 'active'>>({
+    ticker: '',
+    type: 'price',
+    value: 0,
+    condition: 'above',
+    keywords: '',
+    sources: ''
+  });
+
+  // Comparison State
+  const [comparisonTickers, setComparisonTickers] = useState<string[]>([]);
+  const [comparisonData, setComparisonData] = useState<any[]>([]);
+  const [isFetchingComparison, setIsFetchingComparison] = useState(false);
+  const [tickerCompareInput, setTickerCompareInput] = useState('');
 
   // Form State
   const [formData, setFormData] = useState<Asset>({
@@ -78,9 +118,20 @@ export default function App() {
 
   useEffect(() => {
     fetchMarketData();
+    
     const savedAssets = localStorage.getItem('investvision_assets');
     if (savedAssets) {
       setAssets(JSON.parse(savedAssets));
+    }
+
+    const savedHistory = localStorage.getItem('investvision_analysis_history');
+    if (savedHistory) {
+      setAnalysisHistory(JSON.parse(savedHistory));
+    }
+
+    const savedAlerts = localStorage.getItem('investvision_alerts_config');
+    if (savedAlerts) {
+      setAlerts(JSON.parse(savedAlerts));
     }
   }, []);
 
@@ -107,8 +158,9 @@ export default function App() {
     setIsRegistering(false);
   };
 
-  const runAnalysis = async () => {
-    if (!selectedTicker) return;
+  const runAnalysis = async (position?: { quantity: number; avgPrice: number }, tickerOverride?: string) => {
+    const ticker = tickerOverride || selectedTicker;
+    if (!ticker) return;
     setIsAnalyzing(true);
     setAnalysis(null);
     try {
@@ -116,12 +168,27 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          ticker: selectedTicker,
-          context: userContext 
+          ticker: ticker,
+          context: userContext,
+          position: position 
         })
       });
       const data = await res.json();
       setAnalysis(data.analysis);
+
+      // Save to history
+      const newAnalysis: HistoricalAnalysis = {
+        id: crypto.randomUUID(),
+        ticker: ticker,
+        date: new Date().toLocaleString('pt-BR'),
+        summary: data.analysis.substring(0, 150) + "...",
+        analysis: data.analysis,
+        context: userContext
+      };
+      const updatedHistory = [newAnalysis, ...analysisHistory].slice(0, 10); // Keep last 10
+      setAnalysisHistory(updatedHistory);
+      localStorage.setItem('investvision_analysis_history', JSON.stringify(updatedHistory));
+
     } catch (err) {
       setAnalysis("Erro ao realizar análise. Tente novamente.");
     } finally {
@@ -129,7 +196,136 @@ export default function App() {
     }
   };
 
+  const loadPreviousAnalysis = (h: HistoricalAnalysis) => {
+    setSelectedTicker(h.ticker);
+    setUserContext(h.context || '');
+    setAnalysis(h.analysis);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const saveAlerts = (newAlerts: StockAlert[]) => {
+    setAlerts(newAlerts);
+    localStorage.setItem('investvision_alerts_config', JSON.stringify(newAlerts));
+  };
+
+  const handleAddAlert = (newAlert: Omit<StockAlert, 'id' | 'createdAt' | 'active'>) => {
+    const alert: StockAlert = {
+      ...newAlert,
+      id: crypto.randomUUID(),
+      active: true,
+      createdAt: new Date().toLocaleDateString('pt-BR')
+    };
+    saveAlerts([alert, ...alerts]);
+    setIsAddingAlert(false);
+    setAlertForm({
+      ticker: '',
+      type: 'price',
+      value: 0,
+      condition: 'above',
+      keywords: '',
+      sources: ''
+    });
+  };
+
+  const fetchNewsForAlert = async (alert: StockAlert) => {
+    setIsFetchingAlertNews(alert.id);
+    try {
+      const res = await fetch('/api/fetch-news', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker: alert.ticker,
+          keywords: alert.keywords,
+          sources: alert.sources
+        })
+      });
+      const data = await res.json();
+      setAlertNews(prev => ({ ...prev, [alert.id]: data.news }));
+    } catch (err) {
+      console.error("Error fetching alert news", err);
+    } finally {
+      setIsFetchingAlertNews(null);
+    }
+  };
+
+  const fetchComparisonData = async (tickers: string[]) => {
+    if (tickers.length === 0) {
+      setComparisonData([]);
+      return;
+    }
+    setIsFetchingComparison(true);
+    try {
+      const res = await fetch('/api/compare-assets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tickers })
+      });
+      const data = await res.json();
+      setComparisonData(data);
+    } catch (err) {
+      console.error("Failed to fetch comparison data", err);
+    } finally {
+      setIsFetchingComparison(false);
+    }
+  };
+
+  const addTickerToComparison = (ticker: string) => {
+    const t = ticker.toUpperCase().trim();
+    if (t && !comparisonTickers.includes(t)) {
+      const newTickers = [...comparisonTickers, t];
+      setComparisonTickers(newTickers);
+      fetchComparisonData(newTickers);
+      setTickerCompareInput('');
+    }
+  };
+
+  const removeTickerFromComparison = (ticker: string) => {
+    const newTickers = comparisonTickers.filter(t => t !== ticker);
+    setComparisonTickers(newTickers);
+    fetchComparisonData(newTickers);
+  };
+
   const COLORS = ['#10b981', '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899'];
+
+  const typeDistribution = useMemo(() => {
+    return assets.reduce((acc: any, asset) => {
+      const type = asset.type;
+      const totalValue = asset.quantity * asset.avgPrice;
+      if (!acc[type]) acc[type] = 0;
+      acc[type] += totalValue;
+      return acc;
+    }, {});
+  }, [assets]);
+
+  const totalPortfolioValue = useMemo(() => {
+    return assets.reduce((acc, asset) => acc + (asset.quantity * asset.avgPrice), 0);
+  }, [assets]);
+  
+  const distributionData = useMemo(() => {
+    return Object.keys(typeDistribution).map(type => ({
+      name: type,
+      value: typeDistribution[type],
+      percentage: totalPortfolioValue > 0 ? Number(((typeDistribution[type] / totalPortfolioValue) * 100).toFixed(1)) : 0
+    }));
+  }, [typeDistribution, totalPortfolioValue]);
+
+  const pieData = useMemo(() => {
+    return assets.map(a => ({ 
+      name: a.ticker, 
+      value: a.quantity * a.avgPrice 
+    }));
+  }, [assets]);
+
+  const TYPE_COLORS: { [key: string]: string } = {
+    'Ação (B3)': '#10b981',
+    'FII (Fundo Imob.)': '#3b82f6',
+    'ETF (Índices)': '#6366f1',
+    'Criptoativos': '#ec4899',
+    'Ação': '#10b981',
+    'FII': '#3b82f6',
+    'ETF': '#6366f1',
+    'Cripto': '#ec4899'
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-emerald-500 selection:text-slate-950 relative overflow-hidden">
@@ -166,6 +362,15 @@ export default function App() {
             >
               IA Análise
             </button>
+            <button 
+              onClick={() => setActiveTab('alerts')}
+              className={cn(
+                "px-4 py-1.5 rounded-lg text-sm font-medium transition-all",
+                activeTab === 'alerts' ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-white"
+              )}
+            >
+              Alertas
+            </button>
           </nav>
           <button 
             onClick={() => setIsRegistering(true)}
@@ -188,7 +393,7 @@ export default function App() {
               className="space-y-8"
             >
               {/* Summary Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                 <div className="bg-white/5 backdrop-blur-md p-6 rounded-3xl border border-white/10 shadow-sm transition-all hover:bg-white/10">
                   <div className="flex justify-between items-start mb-4">
                     <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Patrimônio Total</p>
@@ -225,6 +430,33 @@ export default function App() {
                       <span key={i} className="text-[10px] bg-white/5 px-2 py-1 rounded-md border border-white/10 font-mono text-slate-300">{a.ticker}</span>
                     ))}
                     {assets.length > 3 && <span className="text-[10px] text-slate-500 font-medium">+{assets.length - 3}</span>}
+                  </div>
+                </div>
+                <div className="bg-white/5 backdrop-blur-md p-6 rounded-3xl border border-white/10 shadow-sm transition-all hover:bg-white/10">
+                  <div className="flex justify-between items-start mb-4">
+                    <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Score de Confiança IA</p>
+                    <div className="p-2 bg-white/5 rounded-lg border border-white/10">
+                      <BrainCircuit size={16} className="text-blue-400" />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4 mt-2">
+                    <div className="relative w-16 h-16 flex items-center justify-center">
+                      <svg className="w-full h-full -rotate-90">
+                        <circle cx="32" cy="32" r="28" stroke="currentColor" strokeWidth="4" fill="transparent" className="text-white/5" />
+                        <circle 
+                          cx="32" cy="32" r="28" stroke="currentColor" strokeWidth="4" fill="transparent" 
+                          strokeDasharray={175.9} 
+                          strokeDashoffset={175.9 * (1 - 0.82)} 
+                          className="text-blue-400" 
+                          strokeLinecap="round" 
+                        />
+                      </svg>
+                      <span className="absolute text-sm font-black text-white">82%</span>
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-bold text-white tracking-tight">Otimista</h4>
+                      <p className="text-[8px] text-slate-500 uppercase font-black tracking-[0.2em]">Mercado High</p>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -280,6 +512,8 @@ export default function App() {
                           dot={{r: 4, strokeWidth: 2, fill: '#10b981', stroke: '#0f172a'}} 
                           activeDot={{r: 6, strokeWidth: 0}}
                           name="Sua Rentabilidade"
+                          isAnimationActive={true}
+                          animationDuration={1000}
                         />
                         <Line 
                           type="monotone" 
@@ -289,6 +523,8 @@ export default function App() {
                           strokeWidth={2}
                           dot={false}
                           name="Benchmark IBOV"
+                          isAnimationActive={true}
+                          animationDuration={1000}
                         />
                       </LineChart>
                     </ResponsiveContainer>
@@ -304,16 +540,18 @@ export default function App() {
                         <ResponsiveContainer width="100%" height="100%">
                           <PieChart>
                             <Pie
-                              data={assets.map(a => ({ name: a.ticker, value: a.quantity * a.avgPrice }))}
+                              data={pieData}
                               cx="50%"
                               cy="50%"
                               innerRadius={70}
                               outerRadius={95}
                               paddingAngle={8}
                               dataKey="value"
+                              isAnimationActive={true}
+                              animationDuration={800}
                             >
-                              {assets.map((_, index) => (
-                                <Cell key={`cell-${index}`} fill={[`#10b981`, `#3b82f6`, `#6366f1`, `#8b5cf6`, `#ec4899`][index % 5]} className="stroke-none" />
+                              {pieData.map((entry, index) => (
+                                <Cell key={`pie-cell-${entry.name}`} fill={COLORS[index % COLORS.length]} className="stroke-none" />
                               ))}
                             </Pie>
                             <Tooltip 
@@ -338,6 +576,177 @@ export default function App() {
                       </div>
                     )}
                   </div>
+                </div>
+              </div>
+
+              {/* Distribution Chart */}
+              <div className="bg-white/5 backdrop-blur-md p-6 rounded-[2rem] border border-white/10 shadow-sm min-h-[400px]">
+                <h4 className="text-lg font-medium text-white mb-8">Distribuição por Classe de Ativo</h4>
+                <div className="h-[300px]">
+                  {assets.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={distributionData} layout="vertical" margin={{ left: 20, right: 40 }}>
+                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                        <XAxis type="number" hide />
+                        <YAxis 
+                          dataKey="name" 
+                          type="category" 
+                          axisLine={false} 
+                          tickLine={false} 
+                          tick={{ fontSize: 12, fill: 'rgba(255,255,255,0.6)', fontWeight: 500 }}
+                          width={120}
+                        />
+                        <Tooltip 
+                          cursor={{ fill: 'rgba(255,255,255,0.05)' }}
+                          contentStyle={{
+                            backgroundColor: 'rgba(15, 23, 42, 0.9)', 
+                            borderRadius: '12px', 
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            backdropFilter: 'blur(10px)',
+                            color: '#fff'
+                          }}
+                          formatter={(value: number, name: string, props: any) => [`${props.payload.percentage}%`, 'Distribuição']}
+                        />
+                        <Bar 
+                          dataKey="percentage" 
+                          radius={[0, 8, 8, 0]} 
+                          barSize={24}
+                          isAnimationActive={true}
+                          animationDuration={800}
+                        >
+                          {distributionData.map((entry) => (
+                            <Cell key={`bar-cell-${entry.name}`} fill={TYPE_COLORS[entry.name] || COLORS[Object.keys(TYPE_COLORS).indexOf(entry.name) % COLORS.length]} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center text-slate-500">
+                      <AlertCircle size={40} className="mb-3 opacity-20" />
+                      <p className="text-sm font-medium">Adicione ativos para ver a distribuição</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Asset Comparison Section */}
+              <div className="bg-white/5 backdrop-blur-md p-6 rounded-[2rem] border border-white/10 shadow-sm min-h-[400px]">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+                  <div>
+                    <h4 className="text-lg font-medium text-white">Comparação de Ativos</h4>
+                    <p className="text-[10px] text-slate-500 uppercase font-black tracking-widest mt-1">Rentabilidade Acumulada (%)</p>
+                  </div>
+                  <div className="flex gap-2 w-full md:w-auto">
+                    <div className="relative flex-1 md:w-48">
+                      <input 
+                        type="text" 
+                        placeholder="Adicionar ticker..."
+                        value={tickerCompareInput}
+                        onChange={(e) => setTickerCompareInput(e.target.value.toUpperCase())}
+                        onKeyDown={(e) => e.key === 'Enter' && addTickerToComparison(tickerCompareInput)}
+                        className="w-full pl-3 pr-8 py-2 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 text-xs font-mono font-bold uppercase"
+                      />
+                      <button 
+                        onClick={() => addTickerToComparison(tickerCompareInput)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-emerald-400 hover:text-emerald-300"
+                      >
+                        <Plus size={16} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2 mb-6">
+                  {comparisonTickers.map((t, idx) => (
+                    <div key={t} className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 group animate-in fade-in zoom-in duration-300">
+                      <div className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS[idx % COLORS.length] }}></div>
+                      <span className="text-xs font-mono font-bold text-white uppercase">{t}</span>
+                      <button 
+                        onClick={() => removeTickerFromComparison(t)}
+                        className="text-slate-500 hover:text-rose-400 opacity-100 transition-all ml-1"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                  {comparisonTickers.length === 0 && (
+                    <div className="flex items-center gap-2 text-slate-500 bg-white/5 px-4 py-2 rounded-xl border border-dashed border-white/10">
+                      <Search size={14} />
+                      <p className="text-[10px] uppercase font-black tracking-widest">Adicione tickers acima para comparar performance</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="h-[300px] relative">
+                  {isFetchingComparison && (
+                    <div className="absolute inset-0 z-10 flex items-center justify-center bg-slate-950/20 backdrop-blur-[2px] rounded-2xl">
+                      <Loader2 size={24} className="text-emerald-500 animate-spin" />
+                    </div>
+                  )}
+                  {comparisonTickers.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={comparisonData}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                        <XAxis 
+                          dataKey="name" 
+                          axisLine={false} 
+                          tickLine={false} 
+                          tick={{fontSize: 10, fill: 'rgba(255,255,255,0.4)', fontWeight: 600}}
+                          dy={10}
+                        />
+                        <YAxis 
+                          hide 
+                          domain={['auto', 'auto']}
+                        />
+                        <Tooltip 
+                          contentStyle={{
+                            backgroundColor: 'rgba(15, 23, 42, 0.9)', 
+                            borderRadius: '16px', 
+                            border: '1px solid rgba(255,255,255,0.1)', 
+                            boxShadow: '0 10px 30px rgba(0,0,0,0.3)',
+                            backdropFilter: 'blur(10px)',
+                            color: '#fff'
+                          }}
+                          itemStyle={{fontSize: '12px'}}
+                          labelStyle={{fontSize: '12px', fontWeight: 'bold', marginBottom: '4px', color: 'rgba(255,255,255,0.6)'}}
+                        />
+                        <Legend 
+                          verticalAlign="top" 
+                          align="right" 
+                          iconType="circle"
+                          content={({ payload }) => (
+                            <div className="flex gap-4 justify-end mb-4">
+                              {payload?.map((entry: any, index: number) => (
+                                <div key={`item-${index}`} className="flex items-center gap-2">
+                                  <div className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }}></div>
+                                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-bold">{entry.value}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        />
+                        {comparisonTickers.map((ticker, index) => (
+                          <Line 
+                            key={ticker}
+                            type="monotone" 
+                            dataKey={ticker} 
+                            stroke={COLORS[index % COLORS.length]} 
+                            strokeWidth={3} 
+                            dot={{r: 4, strokeWidth: 2, fill: COLORS[index % COLORS.length], stroke: '#0f172a'}} 
+                            activeDot={{r: 6, strokeWidth: 0}}
+                            name={ticker}
+                            isAnimationActive={true}
+                            animationDuration={1000}
+                          />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center text-slate-500 opacity-20">
+                      <BarChart3 size={48} className="mb-4" />
+                      <p className="text-sm font-medium">Selecione ativos para visualizar a comparação</p>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -380,7 +789,18 @@ export default function App() {
                           <td className="px-8 py-5 text-sm font-medium text-slate-300">{asset.quantity}</td>
                           <td className="px-8 py-5 text-sm font-mono text-slate-400 whitespace-nowrap">R$ {asset.avgPrice.toFixed(2)}</td>
                           <td className="px-8 py-5 text-sm font-bold text-white whitespace-nowrap">R$ {(asset.quantity * asset.avgPrice).toLocaleString()}</td>
-                          <td className="px-8 py-5 text-right">
+                          <td className="px-8 py-5 text-right flex items-center justify-end gap-2">
+                            <button 
+                              onClick={() => {
+                                setSelectedTicker(asset.ticker);
+                                setActiveTab('analysis');
+                                runAnalysis({ quantity: asset.quantity, avgPrice: asset.avgPrice }, asset.ticker);
+                              }}
+                              className="w-8 h-8 rounded-full flex items-center justify-center text-emerald-400 hover:bg-emerald-400/10 transition-all group-hover:opacity-100"
+                              title="Análise IA Personalizada"
+                            >
+                              <BrainCircuit size={16} />
+                            </button>
                             <button 
                               onClick={() => {
                                 const newAssets = assets.filter((_, i) => i !== idx);
@@ -405,7 +825,7 @@ export default function App() {
                 </div>
               </div>
             </motion.div>
-          ) : (
+          ) : activeTab === 'analysis' ? (
             <motion.div 
               key="analysis"
               initial={{ opacity: 0, scale: 0.98 }}
@@ -446,7 +866,7 @@ export default function App() {
                     </div>
 
                     <button 
-                      onClick={runAnalysis}
+                      onClick={() => runAnalysis()}
                       disabled={isAnalyzing || !selectedTicker}
                       className={cn(
                         "w-full flex items-center justify-center gap-3 px-10 py-5 rounded-2xl font-bold transition-all shadow-xl",
@@ -492,6 +912,162 @@ export default function App() {
                   </div>
                 </motion.div>
               )}
+
+              {/* History Section */}
+              {analysisHistory.length > 0 && (
+                <div className="space-y-6">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-1 h-1 bg-emerald-500 rounded-full"></div>
+                    <h3 className="text-xl font-bold text-white tracking-tight">Histórico de Análises</h3>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {analysisHistory.map((h) => (
+                      <motion.div 
+                        key={h.id}
+                        whileHover={{ scale: 1.01 }}
+                        onClick={() => loadPreviousAnalysis(h)}
+                        className="bg-white/5 backdrop-blur-md p-5 rounded-3xl border border-white/10 cursor-pointer hover:bg-white/10 transition-all flex flex-col justify-between group"
+                      >
+                        <div>
+                          <div className="flex justify-between items-start mb-3">
+                            <span className="font-mono font-bold text-emerald-400 text-lg uppercase tracking-wider">{h.ticker}</span>
+                            <span className="text-[10px] text-slate-500 font-medium uppercase tracking-widest">{h.date}</span>
+                          </div>
+                          <p className="text-xs text-slate-400 line-clamp-3 mb-4 leading-relaxed italic">
+                            "{h.summary}"
+                          </p>
+                        </div>
+                        <div className="flex items-center justify-end text-emerald-400 text-[10px] font-bold uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">
+                          Retomar Análise <ChevronRight size={12} className="ml-1" />
+                        </div>
+                      </motion.div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          ) : (
+            <motion.div 
+              key="alerts"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="max-w-4xl mx-auto space-y-8"
+            >
+              <div className="flex justify-between items-end mb-4">
+                <div>
+                  <h2 className="text-3xl font-black text-white tracking-tight">Meus Alertas</h2>
+                  <p className="text-slate-400 mt-1">Gerencie suas notificações e alertas de mercado</p>
+                </div>
+                <button 
+                  onClick={() => setIsAddingAlert(true)}
+                  className="bg-emerald-500 text-slate-950 px-6 py-3 rounded-2xl font-bold flex items-center gap-2 hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20"
+                >
+                  <Plus size={18} />
+                  Novo Alerta
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4">
+                {alerts.map((alert) => (
+                  <div key={alert.id} className="bg-white/5 backdrop-blur-md p-6 rounded-[2rem] border border-white/10 flex items-center justify-between group">
+                    <div className="flex items-center gap-6">
+                      <div className={cn(
+                        "w-12 h-12 rounded-2xl flex items-center justify-center font-bold text-lg shadow-inner",
+                        alert.active ? "bg-emerald-500/10 text-emerald-400" : "bg-white/5 text-slate-600"
+                      )}>
+                        {alert.ticker.charAt(0)}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-3">
+                          <h4 className="text-xl font-bold text-white tracking-wider">{alert.ticker}</h4>
+                          <span className={cn(
+                            "px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest",
+                            alert.type === 'price' ? "bg-blue-500/20 text-blue-400" : 
+                            alert.type === 'variation' ? "bg-indigo-500/20 text-indigo-400" : 
+                            "bg-amber-500/20 text-amber-400"
+                          )}>
+                            {alert.type === 'price' ? 'Preço Alvo' : alert.type === 'variation' ? 'Variação' : 'Notícias'}
+                          </span>
+                        </div>
+                        <p className="text-slate-400 text-xs mt-1">
+                          {alert.type === 'price' ? `Notificar quando ${alert.condition === 'above' ? 'subir acima de' : 'cair abaixo de'} R$ ${alert.value}` :
+                           alert.type === 'variation' ? `Notificar se variar mais de ${alert.value}%` :
+                           `Monitorando: ${alert.keywords || 'Geral'} ${alert.sources ? `(Fontes: ${alert.sources})` : ''}`}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      {alert.type === 'news' && (
+                        <button 
+                          onClick={() => fetchNewsForAlert(alert)}
+                          disabled={isFetchingAlertNews === alert.id}
+                          className="px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest bg-amber-500/10 text-amber-500 border border-amber-500/20 hover:bg-amber-500/20 transition-all flex items-center gap-2"
+                        >
+                          {isFetchingAlertNews === alert.id ? <Loader2 className="animate-spin" size={14} /> : <Search size={14} />}
+                          Check News
+                        </button>
+                      )}
+                      <button 
+                        onClick={() => {
+                          const newAlerts = alerts.map(a => a.id === alert.id ? { ...a, active: !a.active } : a);
+                          saveAlerts(newAlerts);
+                        }}
+                        className={cn(
+                          "px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all",
+                          alert.active ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-white/5 text-slate-500 border border-white/5"
+                        )}
+                      >
+                        {alert.active ? 'Ativo' : 'Pausado'}
+                      </button>
+                      <button 
+                        onClick={() => {
+                          const newAlerts = alerts.filter(a => a.id !== alert.id);
+                          saveAlerts(newAlerts);
+                        }}
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-slate-600 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-0 group-hover:opacity-100"
+                      >
+                        <X size={18} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                
+                <AnimatePresence>
+                  {Object.keys(alertNews).map(id => (
+                    alertNews[id] && (
+                      <motion.div 
+                        key={`news-${id}`}
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="bg-white/5 backdrop-blur-md p-8 rounded-[2rem] border border-white/10 mt-2 relative">
+                          <button 
+                            onClick={() => setAlertNews(prev => ({ ...prev, [id]: '' }))}
+                            className="absolute top-6 right-6 text-slate-500 hover:text-white"
+                          >
+                            <X size={20} />
+                          </button>
+                          <h5 className="text-sm font-black text-amber-400 uppercase tracking-[0.2em] mb-4">Últimas Notícias Mentonadas</h5>
+                          <div className="prose prose-invert prose-sm max-w-none">
+                            <Markdown>{alertNews[id]}</Markdown>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )
+                  ))}
+                </AnimatePresence>
+
+                {alerts.length === 0 && (
+                  <div className="bg-white/5 backdrop-blur-md p-16 rounded-[2.5rem] border border-white/10 text-center">
+                    <AlertCircle size={48} className="mx-auto mb-4 text-slate-600 opacity-20" />
+                    <h4 className="text-xl font-bold text-white mb-2">Nenhum alerta configurado</h4>
+                    <p className="text-slate-500 max-w-xs mx-auto">Configure alertas para ser notificado sobre preços ou notícias importantes dos seus ativos.</p>
+                  </div>
+                )}
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -595,6 +1171,144 @@ export default function App() {
                   className="w-full bg-emerald-500 text-slate-950 py-5 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-emerald-500/20 hover:bg-emerald-400 hover:-translate-y-0.5 active:scale-95 transition-all flex items-center justify-center gap-3"
                 >
                   Cadastrar Ativo
+                  <ChevronRight size={20} />
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+
+        {isAddingAlert && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsAddingAlert(false)}
+              className="absolute inset-0 bg-slate-950/60 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              className="relative w-full max-w-md bg-slate-900 border border-white/10 rounded-[2.5rem] shadow-2xl overflow-hidden shadow-emerald-500/5"
+            >
+              <div className="p-8 border-b border-white/5 flex justify-between items-center bg-white/5">
+                <h3 className="text-2xl font-bold text-white tracking-tight">Novo Alerta</h3>
+                <button onClick={() => setIsAddingAlert(false)} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-slate-400 hover:text-white transition-all">
+                  <X size={20} />
+                </button>
+              </div>
+              <form 
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleAddAlert(alertForm);
+                }} 
+                className="p-8 space-y-6"
+              >
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Ativo para Alerta</label>
+                  <input 
+                    required
+                    type="text" 
+                    placeholder="Ex: PETR4"
+                    value={alertForm.ticker}
+                    onChange={(e) => setAlertForm({...alertForm, ticker: e.target.value.toUpperCase()})}
+                    className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white placeholder:text-slate-600 transition-all font-mono font-bold tracking-widest text-lg"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Tipo de Alerta</label>
+                  <div className="relative">
+                    <select 
+                      value={alertForm.type}
+                      onChange={(e) => setAlertForm({...alertForm, type: e.target.value as any})}
+                      className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white font-bold appearance-none cursor-pointer"
+                    >
+                      <option value="price" className="bg-slate-900">Preço Alvo</option>
+                      <option value="variation" className="bg-slate-900">Variação (%)</option>
+                      <option value="news" className="bg-slate-900">Notícias Relevantes</option>
+                    </select>
+                    <ChevronRight size={18} className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
+                  </div>
+                </div>
+
+                {alertForm.type !== 'news' && (
+                  <>
+                    <div className="space-y-2">
+                      <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Condição</label>
+                      <div className="flex gap-2">
+                        <button 
+                          type="button"
+                          onClick={() => setAlertForm({...alertForm, condition: 'above'})}
+                          className={cn(
+                            "flex-1 py-3 rounded-xl text-xs font-bold transition-all border",
+                            alertForm.condition === 'above' ? "bg-emerald-500/10 border-emerald-500/50 text-emerald-400" : "bg-white/5 border-white/5 text-slate-500"
+                          )}
+                        >
+                          Acima de
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => setAlertForm({...alertForm, condition: 'below'})}
+                          className={cn(
+                            "flex-1 py-3 rounded-xl text-xs font-bold transition-all border",
+                            alertForm.condition === 'below' ? "bg-rose-500/10 border-rose-500/50 text-rose-400" : "bg-white/5 border-white/5 text-slate-500"
+                          )}
+                        >
+                          Abaixo de
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">
+                        {alertForm.type === 'price' ? 'Valor do Preço (R$)' : 'Percentual de Variação (%)'}
+                      </label>
+                      <input 
+                        required
+                        type="number" 
+                        step="0.01"
+                        placeholder="0.00"
+                        value={alertForm.value || ''}
+                        onChange={(e) => setAlertForm({...alertForm, value: Number(e.target.value)})}
+                        className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white font-bold text-lg"
+                      />
+                    </div>
+                  </>
+                )}
+
+                {alertForm.type === 'news' && (
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Palavras-chave (Opcional)</label>
+                      <input 
+                        type="text" 
+                        placeholder="Ex: fusão, dividendos, CEO"
+                        value={alertForm.keywords}
+                        onChange={(e) => setAlertForm({...alertForm, keywords: e.target.value})}
+                        className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white placeholder:text-slate-600 transition-all font-medium text-sm"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Fontes Específicas (Opcional)</label>
+                      <input 
+                        type="text" 
+                        placeholder="Ex: Bloomberg, Valor Econômico"
+                        value={alertForm.sources}
+                        onChange={(e) => setAlertForm({...alertForm, sources: e.target.value})}
+                        className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white placeholder:text-slate-600 transition-all font-medium text-sm"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <button 
+                  type="submit"
+                  className="w-full bg-emerald-500 text-slate-950 py-5 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-emerald-500/20 hover:bg-emerald-400 hover:-translate-y-0.5 active:scale-95 transition-all flex items-center justify-center gap-3"
+                >
+                  Configurar Alerta
                   <ChevronRight size={20} />
                 </button>
               </form>
