@@ -15,7 +15,10 @@ import {
   X,
   ChevronRight,
   AlertCircle,
-  Loader2
+  Loader2,
+  Trash2,
+  Pencil,
+  Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -64,6 +67,7 @@ interface StockAlert {
 export default function App() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [marketData, setMarketData] = useState<MarketData[]>([]);
+  const [timeframe, setTimeframe] = useState<'daily' | 'weekly' | 'monthly'>('monthly');
   const [isRegistering, setIsRegistering] = useState(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'analysis' | 'alerts'>('dashboard');
   const [selectedTicker, setSelectedTicker] = useState('');
@@ -90,6 +94,10 @@ export default function App() {
   const [isFetchingComparison, setIsFetchingComparison] = useState(false);
   const [tickerCompareInput, setTickerCompareInput] = useState('');
 
+  // Sector Comparison State
+  const [sectorPeers, setSectorPeers] = useState<any[]>([]);
+  const [isFetchingPeers, setIsFetchingPeers] = useState(false);
+
   // Form State
   const [formData, setFormData] = useState<Asset>({
     ticker: '',
@@ -99,6 +107,8 @@ export default function App() {
   });
 
   const [isFetchingPrice, setIsFetchingPrice] = useState(false);
+  const [editingAssetIdx, setEditingAssetIdx] = useState<number | null>(null);
+  const [editQuantity, setEditQuantity] = useState<string>('');
 
   const fetchCurrentPrice = async (ticker: string) => {
     if (!ticker || ticker.length < 4) return;
@@ -133,11 +143,11 @@ export default function App() {
     if (savedAlerts) {
       setAlerts(JSON.parse(savedAlerts));
     }
-  }, []);
+  }, [timeframe]);
 
   const fetchMarketData = async () => {
     try {
-      const res = await fetch('/api/market-data');
+      const res = await fetch(`/api/market-data?timeframe=${timeframe}`);
       const data = await res.json();
       setMarketData(data);
     } catch (err) {
@@ -158,12 +168,26 @@ export default function App() {
     setIsRegistering(false);
   };
 
+  const updateAssetQuantity = (idx: number) => {
+    const qty = parseFloat(editQuantity);
+    if (!isNaN(qty) && qty >= 0) {
+      const newAssets = [...assets];
+      newAssets[idx].quantity = qty;
+      saveAssets(newAssets);
+      setEditingAssetIdx(null);
+    }
+  };
+
   const runAnalysis = async (position?: { quantity: number; avgPrice: number }, tickerOverride?: string) => {
     const ticker = tickerOverride || selectedTicker;
     if (!ticker) return;
     setIsAnalyzing(true);
     setAnalysis(null);
+    setSectorPeers([]);
     try {
+      // Trigger sector peer comparison in parallel
+      fetchSectorComparison(ticker);
+
       const res = await fetch('/api/analyze-stock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -201,6 +225,13 @@ export default function App() {
     setUserContext(h.context || '');
     setAnalysis(h.analysis);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const deleteAnalysisFromHistory = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const updatedHistory = analysisHistory.filter(h => h.id !== id);
+    setAnalysisHistory(updatedHistory);
+    localStorage.setItem('investvision_analysis_history', JSON.stringify(updatedHistory));
   };
 
   const saveAlerts = (newAlerts: StockAlert[]) => {
@@ -285,6 +316,20 @@ export default function App() {
     fetchComparisonData(newTickers);
   };
 
+  const fetchSectorComparison = async (ticker: string) => {
+    setIsFetchingPeers(true);
+    setSectorPeers([]);
+    try {
+      const res = await fetch(`/api/sector-comparison/${ticker}`);
+      const data = await res.json();
+      setSectorPeers(data);
+    } catch (err) {
+      console.error("Failed to fetch sector peers", err);
+    } finally {
+      setIsFetchingPeers(false);
+    }
+  };
+
   const COLORS = ['#10b981', '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899'];
 
   const typeDistribution = useMemo(() => {
@@ -337,11 +382,28 @@ export default function App() {
       {/* Header */}
       <header className="border-b border-white/10 bg-white/5 backdrop-blur-xl sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-gradient-to-br from-emerald-400 to-blue-500 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-emerald-500/20">
-              <TrendingUp size={18} />
+          <div className="flex items-center gap-4">
+            <div className="relative group">
+              <div className="absolute -inset-1 bg-gradient-to-r from-emerald-500 to-blue-500 rounded-xl blur opacity-25 group-hover:opacity-50 transition duration-1000 group-hover:duration-200"></div>
+              <div className="relative w-10 h-10 bg-slate-950 rounded-xl flex items-center justify-center border border-white/10 shadow-2xl">
+                <div className="relative flex flex-col items-center justify-center">
+                  <div className="flex items-baseline gap-[1px]">
+                    <div className="w-1.5 h-3 bg-emerald-500/40 rounded-t-sm"></div>
+                    <div className="w-1.5 h-5 bg-emerald-500/60 rounded-t-sm"></div>
+                    <div className="w-1.5 h-4 bg-emerald-500 rounded-t-sm animate-pulse"></div>
+                  </div>
+                  <div className="absolute -top-1 -right-1">
+                    <div className="w-2 h-2 bg-blue-400 rounded-full blur-[2px] animate-pulse"></div>
+                  </div>
+                </div>
+              </div>
             </div>
-            <h1 className="text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">InvestVision</h1>
+            <div>
+              <h1 className="text-lg font-black tracking-tighter text-white flex items-center gap-1 leading-none uppercase">
+                Porto <span className="text-emerald-400">Invest</span> Vision
+              </h1>
+              <p className="text-[8px] text-slate-500 font-bold tracking-[0.2em] uppercase">Intelligence Unbound</p>
+            </div>
           </div>
           <nav className="flex gap-1 bg-white/5 p-1 rounded-xl border border-white/5">
             <button 
@@ -465,17 +527,34 @@ export default function App() {
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 {/* Evolution Chart */}
                 <div className="lg:col-span-2 bg-white/5 backdrop-blur-md p-6 rounded-[2rem] border border-white/10 shadow-sm min-h-[400px]">
-                  <div className="flex justify-between items-center mb-8">
-                    <h4 className="text-lg font-medium text-white">Evolução da Carteira vs IBOVESPA</h4>
-                    <div className="flex gap-4">
-                      <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 bg-emerald-400 rounded-full"></div>
-                        <span className="text-[10px] text-slate-400 uppercase tracking-widest">Carteira</span>
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
+                    <div>
+                      <h4 className="text-lg font-medium text-white">Evolução da Carteira vs IBOVESPA</h4>
+                      <div className="flex gap-4 mt-1">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 bg-emerald-400 rounded-full"></div>
+                          <span className="text-[10px] text-slate-400 uppercase tracking-widest">Carteira</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 bg-blue-400 rounded-full"></div>
+                          <span className="text-[10px] text-slate-400 uppercase tracking-widest">IBOVESPA</span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 bg-blue-400 rounded-full"></div>
-                        <span className="text-[10px] text-slate-400 uppercase tracking-widest">IBOVESPA</span>
-                      </div>
+                    </div>
+                    
+                    <div className="flex p-1 bg-white/5 rounded-xl border border-white/5">
+                      {(['daily', 'weekly', 'monthly'] as const).map((t) => (
+                        <button
+                          key={t}
+                          onClick={() => setTimeframe(t)}
+                          className={cn(
+                            "px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all",
+                            timeframe === t ? "bg-white/10 text-white" : "text-slate-500 hover:text-slate-300"
+                          )}
+                        >
+                          {t === 'daily' ? 'Diário' : t === 'weekly' ? 'Semanal' : 'Mensal'}
+                        </button>
+                      ))}
                     </div>
                   </div>
                   <div className="h-[300px]">
@@ -786,7 +865,49 @@ export default function App() {
                           <td className="px-8 py-5">
                             <span className="text-xs px-2 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400 font-medium">{asset.type}</span>
                           </td>
-                          <td className="px-8 py-5 text-sm font-medium text-slate-300">{asset.quantity}</td>
+                          <td className="px-8 py-5">
+                            {editingAssetIdx === idx ? (
+                              <div className="flex items-center gap-2">
+                                <input 
+                                  type="number"
+                                  value={editQuantity}
+                                  onChange={(e) => setEditQuantity(e.target.value)}
+                                  className="w-20 px-2 py-1 bg-white/10 border border-white/20 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                                  autoFocus
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') updateAssetQuantity(idx);
+                                    if (e.key === 'Escape') setEditingAssetIdx(null);
+                                  }}
+                                />
+                                <button 
+                                  onClick={() => updateAssetQuantity(idx)}
+                                  className="text-emerald-400 hover:text-emerald-300"
+                                >
+                                  <Check size={16} />
+                                </button>
+                                <button 
+                                  onClick={() => setEditingAssetIdx(null)}
+                                  className="text-rose-400 hover:text-rose-300"
+                                >
+                                  <X size={16} />
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-slate-300">{asset.quantity}</span>
+                                <button 
+                                  onClick={() => {
+                                    setEditingAssetIdx(idx);
+                                    setEditQuantity(asset.quantity.toString());
+                                  }}
+                                  className="text-slate-500 hover:text-emerald-400 opacity-0 group-hover:opacity-100 transition-all"
+                                  title="Alterar Quantidade"
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                              </div>
+                            )}
+                          </td>
                           <td className="px-8 py-5 text-sm font-mono text-slate-400 whitespace-nowrap">R$ {asset.avgPrice.toFixed(2)}</td>
                           <td className="px-8 py-5 text-sm font-bold text-white whitespace-nowrap">R$ {(asset.quantity * asset.avgPrice).toLocaleString()}</td>
                           <td className="px-8 py-5 text-right flex items-center justify-end gap-2">
@@ -806,9 +927,10 @@ export default function App() {
                                 const newAssets = assets.filter((_, i) => i !== idx);
                                 saveAssets(newAssets);
                               }}
-                              className="w-8 h-8 rounded-full flex items-center justify-center text-slate-600 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-0 group-hover:opacity-100"
+                              className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-40 hover:opacity-100"
+                              title="Excluir Ativo"
                             >
-                              <X size={16} />
+                              <Trash2 size={16} />
                             </button>
                           </td>
                         </tr>
@@ -900,9 +1022,80 @@ export default function App() {
                       Relatório Completo
                     </div>
                   </div>
-                  <div className="prose prose-invert max-w-none prose-emerald prose-headings:tracking-tighter prose-p:text-slate-300 prose-p:leading-relaxed prose-strong:text-white prose-li:text-slate-400">
-                    <Markdown>{analysis}</Markdown>
+                  <div className="prose prose-invert max-w-none prose-emerald prose-headings:tracking-tighter prose-p:text-slate-300 prose-p:leading-relaxed prose-strong:text-white prose-li:text-slate-400 prose-headings:text-emerald-400">
+                    <Markdown
+                      components={{
+                        h3: ({node, ...props}) => {
+                          const isRiskHeader = props.children?.toString().toLowerCase().includes('risco');
+                          return (
+                            <h3 {...props} className={cn(
+                              "text-xl font-bold mt-10 mb-4 pb-2 border-b border-white/5 flex items-center gap-2",
+                              isRiskHeader ? "text-rose-400 border-rose-500/20" : "text-emerald-400"
+                            )}>
+                              {isRiskHeader && <AlertCircle size={20} className="text-rose-400" />}
+                              {props.children}
+                            </h3>
+                          );
+                        }
+                      }}
+                    >
+                      {analysis}
+                    </Markdown>
                   </div>
+
+                  {/* Sector Comparison Table */}
+                  <AnimatePresence>
+                    {(sectorPeers.length > 0 || isFetchingPeers) && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="mt-12 overflow-hidden rounded-3xl border border-white/10 bg-white/5 backdrop-blur-md"
+                      >
+                        <div className="p-6 border-b border-white/10 flex items-center justify-between">
+                          <h4 className="text-sm font-bold uppercase tracking-widest text-slate-400">Comparativo Setorial</h4>
+                          {isFetchingPeers && <Loader2 size={16} className="text-emerald-500 animate-spin" />}
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left">
+                            <thead className="bg-white/5 text-[10px] text-slate-500 uppercase tracking-widest font-black">
+                              <tr>
+                                <th className="px-6 py-4">Ticker</th>
+                                <th className="px-6 py-4">Preço</th>
+                                <th className="px-6 py-4">DY (12M)</th>
+                                <th className="px-6 py-4">P/L</th>
+                                <th className="px-6 py-4">Retorno (12M)</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5">
+                              {sectorPeers.map((peer) => (
+                                <tr key={peer.ticker} className={cn(
+                                  "hover:bg-white/5 transition-colors",
+                                  peer.ticker.toUpperCase() === selectedTicker.toUpperCase() ? "bg-emerald-500/5" : ""
+                                )}>
+                                  <td className="px-6 py-4">
+                                    <span className="font-mono font-bold text-white">{peer.ticker}</span>
+                                    {peer.ticker.toUpperCase() === selectedTicker.toUpperCase() && (
+                                      <span className="ml-2 text-[8px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/30 uppercase font-black">Analised</span>
+                                    )}
+                                  </td>
+                                  <td className="px-6 py-4 text-xs font-mono text-slate-300">R$ {peer.price.toFixed(2)}</td>
+                                  <td className="px-6 py-4 text-xs font-mono text-emerald-400">{peer.dy}%</td>
+                                  <td className="px-6 py-4 text-xs font-mono text-blue-400">{peer.pe}x</td>
+                                  <td className="px-6 py-4 text-xs font-mono text-indigo-400">{peer.return12m.toFixed(1)}%</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div className="p-4 bg-emerald-500/5 text-center">
+                          <p className="text-[10px] text-emerald-400/70 font-medium uppercase tracking-widest leading-relaxed">
+                            💡 {sectorPeers.sort((a,b) => b.return12m - a.return12m)[0]?.ticker} apresenta o melhor retorno histórico recente no ramo.
+                          </p>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
                   <div className="mt-12 p-6 bg-rose-500/5 rounded-3xl border border-rose-500/10 flex gap-4 items-start">
                     <AlertCircle className="text-rose-400 shrink-0 mt-0.5" size={20} />
                     <p className="text-xs text-rose-300/60 leading-relaxed font-medium">
@@ -926,12 +1119,19 @@ export default function App() {
                         key={h.id}
                         whileHover={{ scale: 1.01 }}
                         onClick={() => loadPreviousAnalysis(h)}
-                        className="bg-white/5 backdrop-blur-md p-5 rounded-3xl border border-white/10 cursor-pointer hover:bg-white/10 transition-all flex flex-col justify-between group"
+                        className="bg-white/5 backdrop-blur-md p-5 rounded-3xl border border-white/10 cursor-pointer hover:bg-white/10 transition-all flex flex-col justify-between group relative"
                       >
+                        <button 
+                          onClick={(e) => deleteAnalysisFromHistory(h.id, e)}
+                          className="absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center text-slate-600 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-0 group-hover:opacity-100 z-10"
+                          title="Excluir do Histórico"
+                        >
+                          <Trash2 size={14} />
+                        </button>
                         <div>
                           <div className="flex justify-between items-start mb-3">
                             <span className="font-mono font-bold text-emerald-400 text-lg uppercase tracking-wider">{h.ticker}</span>
-                            <span className="text-[10px] text-slate-500 font-medium uppercase tracking-widest">{h.date}</span>
+                            <span className="text-[10px] text-slate-500 font-medium uppercase tracking-widest mr-8">{h.date}</span>
                           </div>
                           <p className="text-xs text-slate-400 line-clamp-3 mb-4 leading-relaxed italic">
                             "{h.summary}"
@@ -1025,9 +1225,10 @@ export default function App() {
                           const newAlerts = alerts.filter(a => a.id !== alert.id);
                           saveAlerts(newAlerts);
                         }}
-                        className="w-10 h-10 rounded-full flex items-center justify-center text-slate-600 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-0 group-hover:opacity-100"
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-40 group-hover:opacity-100"
+                        title="Excluir Alerta"
                       >
-                        <X size={18} />
+                        <Trash2 size={18} />
                       </button>
                     </div>
                   </div>

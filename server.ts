@@ -42,7 +42,13 @@ async function startServer() {
       const prompt = `Analise a ação ${ticker} do mercado brasileiro (B3). 
       ${positionContext}
       Considere o seguinte contexto adicional do usuário: ${context || 'Nenhum contexto adicional'}.
-      Forneça uma análise preditiva fundamentada (lembrando que não é recomendação oficial), 
+      
+      Sua resposta DEVE incluir obrigatoriamente uma seção intitulada "### Análise de Risco Detalhada" que descreva:
+      1. Volatilidade Histórica: Uma estimativa da volatilidade recente comparada ao setor.
+      2. Correlação com o Mercado: Como o ativo se comporta em relação ao IBOVESPA (beta).
+      3. Cenários de Estresse: O que aconteceria com o ativo em cenários de alta de juros, crise setorial ou instabilidade política.
+      
+      Forneça também uma análise preditiva fundamentada (lembrando que não é recomendação oficial), 
       destacando pontos de atenção, oportunidades e uma estimativa de tendência para os próximos meses.
       Responda em Português formatado em Markdown com um tom profissional e analítico.`;
 
@@ -63,18 +69,40 @@ async function startServer() {
 
   // Mock Market Data Endpoint
   app.get("/api/market-data", (req, res) => {
-    // Return some mock historical data for the last 6 months
+    const { timeframe } = req.query;
     const now = new Date();
     const data = [];
     
-    for (let i = 6; i >= 0; i--) {
-      const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const monthName = date.toLocaleString('pt-BR', { month: 'short' });
+    let points = 6;
+    let stepDescription = 'month';
+
+    if (timeframe === 'daily') {
+      points = 30;
+      stepDescription = 'day';
+    } else if (timeframe === 'weekly') {
+      points = 12;
+      stepDescription = 'week';
+    }
+
+    for (let i = points; i >= 0; i--) {
+      let date: Date;
+      let name: string;
+
+      if (timeframe === 'daily') {
+        date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+        name = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+      } else if (timeframe === 'weekly') {
+        date = new Date(now.getTime() - i * 7 * 24 * 60 * 60 * 1000);
+        name = `Sem ${points - i + 1}`;
+      } else {
+        date = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        name = date.toLocaleString('pt-BR', { month: 'short' });
+      }
       
       data.push({
-        name: monthName,
-        ibov: 110000 + Math.random() * 20000 - 10000 + (i * 2000), // Improving trend
-        portfolio: 100 + Math.random() * 20 - 10 + (i * 3.5), // Portfolio in %
+        name: name,
+        ibov: 110000 + Math.random() * 15000 - 7500 + (i * (points / 3)), // Improving trend
+        portfolio: 100 + Math.random() * 15 - 7.5 + (i * 0.5), // Portfolio in %
       });
     }
 
@@ -148,6 +176,37 @@ async function startServer() {
     }
 
     res.json(data);
+  });
+
+  app.get("/api/sector-comparison/:ticker", async (req, res) => {
+    const { ticker } = req.params;
+    try {
+      const prompt = `Identifique 3-4 ativos do mesmo setor/ramo que ${ticker} na B3 (Brasil).
+      Para cada um (incluindo ${ticker}), gere dados fictícios mas realistas de:
+      - Ticker
+      - Preço Atual
+      - Dividend Yield (L12M %)
+      - P/L (Preço/Lucro)
+      - Rentabilidade 12M (%)
+      Retorne APENAS um objeto JSON válido seguindo este formato:
+      [
+        {"ticker": "ABC3", "price": 10.5, "dy": 5.2, "pe": 12.4, "return12m": 15.6},
+        ...
+      ]`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt
+      });
+
+      // Simple JSON extraction from response
+      const jsonStr = response.text.substring(response.text.indexOf('['), response.text.lastIndexOf(']') + 1);
+      const data = JSON.parse(jsonStr);
+      res.json(data);
+    } catch (error: any) {
+      console.error("Sector Comparison Error:", error);
+      res.status(500).json({ error: "Failed to fetch sector comparison" });
+    }
   });
 
   // Vite middleware setup
