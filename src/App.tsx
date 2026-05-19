@@ -18,7 +18,10 @@ import {
   Loader2,
   Trash2,
   Pencil,
-  Check
+  Check,
+  Newspaper,
+  RefreshCw,
+  Filter
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -35,6 +38,7 @@ interface Asset {
   quantity: number;
   avgPrice: number;
   type: string;
+  currentPrice?: number;
 }
 
 interface MarketData {
@@ -50,6 +54,7 @@ interface HistoricalAnalysis {
   summary: string;
   analysis: string;
   context?: string;
+  news?: string;
 }
 
 interface StockAlert {
@@ -74,6 +79,7 @@ export default function App() {
   const [userContext, setUserContext] = useState('');
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisLevel, setAnalysisLevel] = useState<'básico' | 'intermediário' | 'avançado'>('intermediário');
   const [analysisHistory, setAnalysisHistory] = useState<HistoricalAnalysis[]>([]);
   const [alerts, setAlerts] = useState<StockAlert[]>([]);
   const [isAddingAlert, setIsAddingAlert] = useState(false);
@@ -98,17 +104,30 @@ export default function App() {
   const [sectorPeers, setSectorPeers] = useState<any[]>([]);
   const [isFetchingPeers, setIsFetchingPeers] = useState(false);
 
+  // Asset Variation Chart State
+  const [variationData, setVariationData] = useState<{ ticker: string; variation: number }[]>([]);
+  const [variationPeriod, setVariationPeriod] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+  const [isVariationMock, setIsVariationMock] = useState(false);
+
+  // News Analysis State
+  const [activeAnalysisNews, setActiveAnalysisNews] = useState<string | null>(null);
+  const [isFetchingAnalysisNews, setIsFetchingAnalysisNews] = useState(false);
+  const [newsKeywords, setNewsKeywords] = useState('');
+  const [newsSources, setNewsSources] = useState('');
+  const [showNewsFilters, setShowNewsFilters] = useState(false);
+
   // Form State
   const [formData, setFormData] = useState<Asset>({
     ticker: '',
     quantity: 0,
     avgPrice: 0,
-    type: 'Ação'
+    type: 'Ação (B3)'
   });
 
   const [isFetchingPrice, setIsFetchingPrice] = useState(false);
   const [editingAssetIdx, setEditingAssetIdx] = useState<number | null>(null);
   const [editQuantity, setEditQuantity] = useState<string>('');
+  const [assetSearchQuery, setAssetSearchQuery] = useState<string>('');
 
   const fetchCurrentPrice = async (ticker: string) => {
     if (!ticker || ticker.length < 4) return;
@@ -123,6 +142,34 @@ export default function App() {
       console.error("Error fetching price", err);
     } finally {
       setIsFetchingPrice(false);
+    }
+  };
+
+  const [isRefreshingPrices, setIsRefreshingPrices] = useState(false);
+
+  const refreshAllPrices = async () => {
+    if (assets.length === 0) return;
+    setIsRefreshingPrices(true);
+    try {
+      const updatedAssets = await Promise.all(
+        assets.map(async (asset) => {
+          try {
+            const res = await fetch(`/api/current-price/${asset.ticker}`);
+            const data = await res.json();
+            if (data.price > 0) {
+              return { ...asset, currentPrice: data.price };
+            }
+          } catch (err) {
+            console.error(`Failed to refresh price for ${asset.ticker}`, err);
+          }
+          return asset;
+        })
+      );
+      saveAssets(updatedAssets);
+    } catch (err) {
+      console.error("Failed to refresh prices", err);
+    } finally {
+      setIsRefreshingPrices(false);
     }
   };
 
@@ -145,6 +192,22 @@ export default function App() {
     }
   }, [timeframe]);
 
+  const fetchVariationData = async () => {
+    try {
+      const tickers = assets.map(a => a.ticker).join(',');
+      const res = await fetch(`/api/assets-variation?tickers=${tickers}&period=${variationPeriod}`);
+      const result = await res.json();
+      setVariationData(result.data);
+      setIsVariationMock(result.isMockData);
+    } catch (err) {
+      console.error("Error fetching variation data", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchVariationData();
+  }, [assets, variationPeriod]);
+
   const fetchMarketData = async () => {
     try {
       const res = await fetch(`/api/market-data?timeframe=${timeframe}`);
@@ -160,11 +223,42 @@ export default function App() {
     localStorage.setItem('investvision_assets', JSON.stringify(newAssets));
   };
 
-  const handleAddAsset = (e: React.FormEvent) => {
+  const handleAddAsset = async (e: React.FormEvent) => {
     e.preventDefault();
-    const newAssets = [...assets, { ...formData, ticker: formData.ticker.toUpperCase() }];
+    const tickerUpper = formData.ticker.toUpperCase();
+    setIsFetchingPrice(true);
+    let fetchedCurrentPrice = formData.avgPrice;
+    try {
+      const res = await fetch(`/api/current-price/${tickerUpper}`);
+      const data = await res.json();
+      if (data.price > 0) {
+        fetchedCurrentPrice = data.price;
+      }
+    } catch (err) {
+      console.error("Error fetching price on add", err);
+    } finally {
+      setIsFetchingPrice(false);
+    }
+    const existingAssetIndex = assets.findIndex(a => a.ticker === tickerUpper);
+    let newAssets;
+    if (existingAssetIndex > -1) {
+      const existingAsset = assets[existingAssetIndex];
+      const totalQuantity = existingAsset.quantity + formData.quantity;
+      const totalCost = (existingAsset.quantity * existingAsset.avgPrice) + (formData.quantity * formData.avgPrice);
+      const newAvgPrice = totalQuantity > 0 ? totalCost / totalQuantity : 0;
+      
+      newAssets = [...assets];
+      newAssets[existingAssetIndex] = {
+        ...existingAsset,
+        quantity: totalQuantity,
+        avgPrice: newAvgPrice,
+        currentPrice: fetchedCurrentPrice || existingAsset.currentPrice || newAvgPrice
+      };
+    } else {
+      newAssets = [...assets, { ...formData, ticker: tickerUpper, currentPrice: fetchedCurrentPrice }];
+    }
     saveAssets(newAssets);
-    setFormData({ ticker: '', quantity: 0, avgPrice: 0, type: 'Ação' });
+    setFormData({ ticker: '', quantity: 0, avgPrice: 0, type: 'Ação (B3)' });
     setIsRegistering(false);
   };
 
@@ -178,36 +272,67 @@ export default function App() {
     }
   };
 
+  const fetchAnalysisNews = async (ticker: string, keywordsOverride?: string, sourcesOverride?: string) => {
+    setIsFetchingAnalysisNews(true);
+    try {
+      const res = await fetch('/api/fetch-news', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker,
+          keywords: keywordsOverride !== undefined ? keywordsOverride : newsKeywords,
+          sources: sourcesOverride !== undefined ? sourcesOverride : newsSources
+        })
+      });
+      const data = await res.json();
+      setActiveAnalysisNews(data.news);
+      return data.news;
+    } catch (err) {
+      console.error("Error fetching analysis news", err);
+      setActiveAnalysisNews("Erro ao carregar notícias para este ativo.");
+      return null;
+    } finally {
+      setIsFetchingAnalysisNews(false);
+    }
+  };
+
   const runAnalysis = async (position?: { quantity: number; avgPrice: number }, tickerOverride?: string) => {
     const ticker = tickerOverride || selectedTicker;
     if (!ticker) return;
     setIsAnalyzing(true);
     setAnalysis(null);
     setSectorPeers([]);
+    setActiveAnalysisNews(null);
     try {
       // Trigger sector peer comparison in parallel
       fetchSectorComparison(ticker);
 
-      const res = await fetch('/api/analyze-stock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          ticker: ticker,
-          context: userContext,
-          position: position 
-        })
-      });
-      const data = await res.json();
-      setAnalysis(data.analysis);
+      // Run both API requests in parallel for super fast loading
+      const [analysisRes, newsText] = await Promise.all([
+        fetch('/api/analyze-stock', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            ticker: ticker,
+            context: userContext,
+            position: position,
+            detailLevel: analysisLevel
+          })
+        }).then(res => res.json()),
+        fetchAnalysisNews(ticker)
+      ]);
 
-      // Save to history
+      setAnalysis(analysisRes.analysis);
+
+      // Save to history with news
       const newAnalysis: HistoricalAnalysis = {
         id: crypto.randomUUID(),
         ticker: ticker,
         date: new Date().toLocaleString('pt-BR'),
-        summary: data.analysis.substring(0, 150) + "...",
-        analysis: data.analysis,
-        context: userContext
+        summary: analysisRes.analysis.substring(0, 150) + "...",
+        analysis: analysisRes.analysis,
+        context: userContext,
+        news: newsText || undefined
       };
       const updatedHistory = [newAnalysis, ...analysisHistory].slice(0, 10); // Keep last 10
       setAnalysisHistory(updatedHistory);
@@ -224,6 +349,10 @@ export default function App() {
     setSelectedTicker(h.ticker);
     setUserContext(h.context || '');
     setAnalysis(h.analysis);
+    setActiveAnalysisNews(h.news || null);
+    if (!h.news) {
+      fetchAnalysisNews(h.ticker);
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -335,16 +464,25 @@ export default function App() {
   const typeDistribution = useMemo(() => {
     return assets.reduce((acc: any, asset) => {
       const type = asset.type;
-      const totalValue = asset.quantity * asset.avgPrice;
+      const totalValue = asset.quantity * (asset.currentPrice || asset.avgPrice);
       if (!acc[type]) acc[type] = 0;
       acc[type] += totalValue;
       return acc;
     }, {});
   }, [assets]);
 
-  const totalPortfolioValue = useMemo(() => {
+  const totalPortfolioCost = useMemo(() => {
     return assets.reduce((acc, asset) => acc + (asset.quantity * asset.avgPrice), 0);
   }, [assets]);
+
+  const totalPortfolioValue = useMemo(() => {
+    return assets.reduce((acc, asset) => acc + (asset.quantity * (asset.currentPrice || asset.avgPrice)), 0);
+  }, [assets]);
+
+  const totalPortfolioProfitLossPercentage = useMemo(() => {
+    if (totalPortfolioCost === 0) return 0;
+    return ((totalPortfolioValue - totalPortfolioCost) / totalPortfolioCost) * 100;
+  }, [totalPortfolioValue, totalPortfolioCost]);
   
   const distributionData = useMemo(() => {
     return Object.keys(typeDistribution).map(type => ({
@@ -357,7 +495,7 @@ export default function App() {
   const pieData = useMemo(() => {
     return assets.map(a => ({ 
       name: a.ticker, 
-      value: a.quantity * a.avgPrice 
+      value: a.quantity * (a.currentPrice || a.avgPrice)
     }));
   }, [assets]);
 
@@ -463,10 +601,19 @@ export default function App() {
                       <Wallet size={16} className="text-slate-400" />
                     </div>
                   </div>
-                  <h3 className="text-3xl font-light text-white">R$ {assets.reduce((acc, curr) => acc + (curr.quantity * curr.avgPrice), 0).toLocaleString()}</h3>
-                  <div className="mt-4 flex items-center gap-1 text-emerald-400 text-sm font-medium">
-                    <TrendingUp size={14} />
-                    <span>+4.2% este mês</span>
+                  <h3 className="text-3xl font-light text-white">R$ {totalPortfolioValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</h3>
+                  <div className="mt-4 flex items-center gap-1 text-sm font-medium">
+                    {totalPortfolioProfitLossPercentage >= 0 ? (
+                      <span className="flex items-center gap-1 text-emerald-400">
+                        <TrendingUp size={14} />
+                        <span>+{totalPortfolioProfitLossPercentage.toFixed(2)}% retorno geral</span>
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1 text-rose-400">
+                        <TrendingDown size={14} />
+                        <span>{totalPortfolioProfitLossPercentage.toFixed(2)}% retorno geral</span>
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="bg-white/5 backdrop-blur-md p-6 rounded-3xl border border-white/10 shadow-sm transition-all hover:bg-white/10">
@@ -658,51 +805,144 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Distribution Chart */}
-              <div className="bg-white/5 backdrop-blur-md p-6 rounded-[2rem] border border-white/10 shadow-sm min-h-[400px]">
-                <h4 className="text-lg font-medium text-white mb-8">Distribuição por Classe de Ativo</h4>
-                <div className="h-[300px]">
-                  {assets.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={distributionData} layout="vertical" margin={{ left: 20, right: 40 }}>
-                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
-                        <XAxis type="number" hide />
-                        <YAxis 
-                          dataKey="name" 
-                          type="category" 
-                          axisLine={false} 
-                          tickLine={false} 
-                          tick={{ fontSize: 12, fill: 'rgba(255,255,255,0.6)', fontWeight: 500 }}
-                          width={120}
-                        />
-                        <Tooltip 
-                          cursor={{ fill: 'rgba(255,255,255,0.05)' }}
-                          contentStyle={{
-                            backgroundColor: 'rgba(15, 23, 42, 0.9)', 
-                            borderRadius: '12px', 
-                            border: '1px solid rgba(255,255,255,0.1)',
-                            backdropFilter: 'blur(10px)',
-                            color: '#fff'
-                          }}
-                          formatter={(value: number, name: string, props: any) => [`${props.payload.percentage}%`, 'Distribuição']}
-                        />
-                        <Bar 
-                          dataKey="percentage" 
-                          radius={[0, 8, 8, 0]} 
-                          barSize={24}
-                          isAnimationActive={true}
-                          animationDuration={800}
-                        >
-                          {distributionData.map((entry) => (
-                            <Cell key={`bar-cell-${entry.name}`} fill={TYPE_COLORS[entry.name] || COLORS[Object.keys(TYPE_COLORS).indexOf(entry.name) % COLORS.length]} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  ) : (
-                    <div className="h-full flex flex-col items-center justify-center text-slate-500">
-                      <AlertCircle size={40} className="mb-3 opacity-20" />
-                      <p className="text-sm font-medium">Adicione ativos para ver a distribuição</p>
+              {/* Grid 2: Distribution & Variation */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                {/* Distribution Chart */}
+                <div className="bg-white/5 backdrop-blur-md p-6 rounded-[2rem] border border-white/10 shadow-sm min-h-[400px]">
+                  <h4 className="text-lg font-medium text-white mb-8">Distribuição por Classe de Ativo</h4>
+                  <div className="h-[300px]">
+                    {assets.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={distributionData} layout="vertical" margin={{ left: 20, right: 40 }}>
+                          <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                          <XAxis type="number" hide />
+                          <YAxis 
+                            dataKey="name" 
+                            type="category" 
+                            axisLine={false} 
+                            tickLine={false} 
+                            tick={{ fontSize: 12, fill: 'rgba(255,255,255,0.6)', fontWeight: 500 }}
+                            width={120}
+                          />
+                          <Tooltip 
+                            cursor={{ fill: 'rgba(255,255,255,0.05)' }}
+                            contentStyle={{
+                              backgroundColor: 'rgba(15, 23, 42, 0.9)', 
+                              borderRadius: '12px', 
+                              border: '1px solid rgba(255,255,255,0.1)',
+                              backdropFilter: 'blur(10px)',
+                              color: '#fff'
+                            }}
+                            formatter={(value: number, name: string, props: any) => [`${props.payload.percentage}%`, 'Distribuição']}
+                          />
+                          <Bar 
+                            dataKey="percentage" 
+                            radius={[0, 8, 8, 0]} 
+                            barSize={24}
+                            isAnimationActive={true}
+                            animationDuration={800}
+                          >
+                            {distributionData.map((entry) => (
+                              <Cell key={`bar-cell-${entry.name}`} fill={TYPE_COLORS[entry.name] || COLORS[Object.keys(TYPE_COLORS).indexOf(entry.name) % COLORS.length]} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-500">
+                        <AlertCircle size={40} className="mb-3 opacity-20" />
+                        <p className="text-sm font-medium">Adicione ativos para ver a distribuição</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Performance/Variation Chart */}
+                <div className="bg-white/5 backdrop-blur-md p-6 rounded-[2rem] border border-white/10 shadow-sm min-h-[400px] flex flex-col justify-between">
+                  <div>
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
+                      <div>
+                        <h4 className="text-lg font-medium text-white">Variação Percentual dos Ativos</h4>
+                        <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mt-1">
+                          {isVariationMock ? "Desempenho de Amostra do Mercado (%)" : "Desempenho Individual (%)"}
+                        </p>
+                      </div>
+                      
+                      <div className="flex p-1 bg-white/5 rounded-xl border border-white/5 shrink-0 self-end sm:self-auto">
+                        {(['daily', 'weekly', 'monthly'] as const).map((p) => (
+                          <button
+                            key={p}
+                            onClick={() => setVariationPeriod(p)}
+                            className={cn(
+                              "px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all",
+                              variationPeriod === p ? "bg-white/10 text-white" : "text-slate-500 hover:text-slate-300"
+                            )}
+                          >
+                            {p === 'daily' ? 'Diário' : p === 'weekly' ? 'Semanal' : 'Mensal'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="h-[270px]">
+                      {variationData.length > 0 ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={variationData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                            <XAxis 
+                              dataKey="ticker" 
+                              axisLine={false} 
+                              tickLine={false} 
+                              tick={{ fontSize: 10, fill: 'rgba(255,255,255,0.4)', fontWeight: 600 }}
+                            />
+                            <YAxis 
+                              axisLine={false}
+                              tickLine={false}
+                              tick={{ fontSize: 10, fill: 'rgba(255,255,255,0.4)', fontWeight: 600 }}
+                              tickFormatter={(val) => `${val > 0 ? '+' : ''}${val}%`}
+                            />
+                            <Tooltip 
+                              cursor={{ fill: 'rgba(255,255,255,0.05)' }}
+                              contentStyle={{
+                                backgroundColor: 'rgba(15, 23, 42, 0.9)', 
+                                borderRadius: '12px', 
+                                border: '1px solid rgba(255,255,255,0.1)',
+                                backdropFilter: 'blur(10px)',
+                                color: '#fff'
+                              }}
+                              formatter={(value: number) => [`${value > 0 ? '+' : ''}${value}%`, 'Variação']}
+                            />
+                            <Bar 
+                              dataKey="variation" 
+                              isAnimationActive={true}
+                              animationDuration={800}
+                              radius={[6, 6, 0, 0]}
+                            >
+                              {variationData.map((entry, idx) => {
+                                const isPositive = entry.variation >= 0;
+                                return (
+                                  <Cell 
+                                    key={`cell-${idx}`} 
+                                    fill={isPositive ? '#10b981' : '#f43f5e'} 
+                                  />
+                                );
+                              })}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <div className="h-full flex flex-col items-center justify-center text-slate-500">
+                          <AlertCircle size={40} className="mb-3 opacity-20" />
+                          <p className="text-sm font-medium">Adicione ativos para ver a variação</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {isVariationMock && (
+                    <div className="mt-4 px-4 py-2 rounded-xl bg-amber-500/5 border border-amber-500/10 text-center">
+                      <p className="text-[9px] text-amber-500/80 font-bold uppercase tracking-widest leading-relaxed">
+                        Exibindo ativos modelo (adicione ativos em sua carteira para ver a sua variação real)
+                      </p>
                     </div>
                   )}
                 </div>
@@ -831,11 +1071,42 @@ export default function App() {
 
               {/* Assets Table */}
               <div className="bg-white/5 backdrop-blur-md rounded-[2rem] border border-white/10 shadow-sm overflow-hidden">
-                <div className="p-6 border-b border-white/5 flex justify-between items-center bg-white/5">
-                  <h4 className="text-lg font-medium text-white">Posição Detalhada</h4>
-                  <div className="flex gap-2">
-                    <div className="px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase tracking-wider">
-                      Mercado Aberto
+                <div className="p-6 border-b border-white/5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white/5">
+                  <div>
+                    <h4 className="text-lg font-medium text-white">Posição Detalhada</h4>
+                  </div>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full md:w-auto">
+                    {/* Filtro de Busca */}
+                    <div className="relative flex-1 sm:w-64">
+                      <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                      <input
+                        type="text"
+                        placeholder="Buscar ativo por ticker ou tipo..."
+                        value={assetSearchQuery}
+                        onChange={(e) => setAssetSearchQuery(e.target.value)}
+                        className="w-full pl-10 pr-4 py-1.5 bg-white/5 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/50 focus:border-emerald-500/50 transition-all font-mono"
+                      />
+                      {assetSearchQuery && (
+                        <button
+                          onClick={() => setAssetSearchQuery('')}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                        >
+                          <X size={12} />
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={refreshAllPrices}
+                        disabled={isRefreshingPrices || assets.length === 0}
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 disabled:bg-slate-700/50 disabled:text-slate-500 rounded-xl text-[10px] text-emerald-400 font-bold uppercase tracking-wider transition-all"
+                      >
+                        <RefreshCw size={11} className={cn(isRefreshingPrices && "animate-spin")} />
+                        {isRefreshingPrices ? "Atualizando..." : "Atualizar Tempo Real"}
+                      </button>
+                      <div className="px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase tracking-wider text-center">
+                        Mercado Aberto
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -847,101 +1118,137 @@ export default function App() {
                         <th className="px-8 py-5">Classe</th>
                         <th className="px-8 py-5">Quantidade</th>
                         <th className="px-8 py-5">Custo Médio</th>
+                        <th className="px-8 py-5">Preço Atual</th>
+                        <th className="px-8 py-5">Rentabilidade</th>
                         <th className="px-8 py-5">Patrimônio</th>
                         <th className="px-8 py-5 text-right">Controle</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
-                      {assets.map((asset, idx) => (
-                        <tr key={idx} className="hover:bg-white/5 transition-all group">
-                          <td className="px-8 py-5">
-                            <div className="flex items-center gap-3">
-                              <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400 font-bold text-xs">
-                                {asset.ticker.charAt(0)}
+                       {assets
+                         .filter(asset => {
+                           if (!assetSearchQuery) return true;
+                           const query = assetSearchQuery.toLowerCase();
+                           return asset.ticker.toLowerCase().includes(query) || 
+                                  asset.type.toLowerCase().includes(query);
+                         })
+                         .map((asset, idx) => {
+                         const currentPrice = asset.currentPrice || asset.avgPrice;
+                         const profitLoss = ((currentPrice - asset.avgPrice) / asset.avgPrice) * 100;
+                         const equity = asset.quantity * currentPrice;
+
+                         return (
+                          <tr key={idx} className="hover:bg-white/5 transition-all group">
+                            <td className="px-8 py-5">
+                              <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400 font-bold text-xs">
+                                  {asset.ticker.charAt(0)}
+                                </div>
+                                <span className="font-mono font-bold text-white tracking-wider">{asset.ticker}</span>
                               </div>
-                              <span className="font-mono font-bold text-white tracking-wider">{asset.ticker}</span>
-                            </div>
-                          </td>
-                          <td className="px-8 py-5">
-                            <span className="text-xs px-2 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400 font-medium">{asset.type}</span>
-                          </td>
-                          <td className="px-8 py-5">
-                            {editingAssetIdx === idx ? (
-                              <div className="flex items-center gap-2">
-                                <input 
-                                  type="number"
-                                  value={editQuantity}
-                                  onChange={(e) => setEditQuantity(e.target.value)}
-                                  className="w-20 px-2 py-1 bg-white/10 border border-white/20 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                                  autoFocus
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') updateAssetQuantity(idx);
-                                    if (e.key === 'Escape') setEditingAssetIdx(null);
-                                  }}
-                                />
-                                <button 
-                                  onClick={() => updateAssetQuantity(idx)}
-                                  className="text-emerald-400 hover:text-emerald-300"
-                                >
-                                  <Check size={16} />
-                                </button>
-                                <button 
-                                  onClick={() => setEditingAssetIdx(null)}
-                                  className="text-rose-400 hover:text-rose-300"
-                                >
-                                  <X size={16} />
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-slate-300">{asset.quantity}</span>
-                                <button 
-                                  onClick={() => {
-                                    setEditingAssetIdx(idx);
-                                    setEditQuantity(asset.quantity.toString());
-                                  }}
-                                  className="text-slate-500 hover:text-emerald-400 opacity-0 group-hover:opacity-100 transition-all"
-                                  title="Alterar Quantidade"
-                                >
-                                  <Pencil size={12} />
-                                </button>
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-8 py-5 text-sm font-mono text-slate-400 whitespace-nowrap">R$ {asset.avgPrice.toFixed(2)}</td>
-                          <td className="px-8 py-5 text-sm font-bold text-white whitespace-nowrap">R$ {(asset.quantity * asset.avgPrice).toLocaleString()}</td>
-                          <td className="px-8 py-5 text-right flex items-center justify-end gap-2">
-                            <button 
-                              onClick={() => {
-                                setSelectedTicker(asset.ticker);
-                                setActiveTab('analysis');
-                                runAnalysis({ quantity: asset.quantity, avgPrice: asset.avgPrice }, asset.ticker);
-                              }}
-                              className="w-8 h-8 rounded-full flex items-center justify-center text-emerald-400 hover:bg-emerald-400/10 transition-all group-hover:opacity-100"
-                              title="Análise IA Personalizada"
-                            >
-                              <BrainCircuit size={16} />
-                            </button>
-                            <button 
-                              onClick={() => {
-                                const newAssets = assets.filter((_, i) => i !== idx);
-                                saveAssets(newAssets);
-                              }}
-                              className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-40 hover:opacity-100"
-                              title="Excluir Ativo"
-                            >
-                              <Trash2 size={16} />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                      {assets.length === 0 && (
-                        <tr>
-                          <td colSpan={6} className="px-8 py-16 text-center text-slate-500 italic font-medium">
-                            Sua carteira está vazia. Comece adicionando seu primeiro ativo.
-                          </td>
-                        </tr>
-                      )}
+                            </td>
+                            <td className="px-8 py-5">
+                              <span className="text-xs px-2 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400 font-medium">{asset.type}</span>
+                            </td>
+                            <td className="px-8 py-5">
+                              {editingAssetIdx === idx ? (
+                                <div className="flex items-center gap-2">
+                                  <input 
+                                    type="number"
+                                    value={editQuantity}
+                                    onChange={(e) => setEditQuantity(e.target.value)}
+                                    className="w-20 px-2 py-1 bg-white/10 border border-white/20 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                                    autoFocus
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') updateAssetQuantity(idx);
+                                      if (e.key === 'Escape') setEditingAssetIdx(null);
+                                    }}
+                                  />
+                                  <button 
+                                    onClick={() => updateAssetQuantity(idx)}
+                                    className="text-emerald-400 hover:text-emerald-300"
+                                  >
+                                    <Check size={16} />
+                                  </button>
+                                  <button 
+                                    onClick={() => setEditingAssetIdx(null)}
+                                    className="text-rose-400 hover:text-rose-300"
+                                  >
+                                    <X size={16} />
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm font-medium text-slate-300">{asset.quantity}</span>
+                                  <button 
+                                    onClick={() => {
+                                      setEditingAssetIdx(idx);
+                                      setEditQuantity(asset.quantity.toString());
+                                    }}
+                                    className="text-slate-500 hover:text-emerald-400 opacity-0 group-hover:opacity-100 transition-all"
+                                    title="Alterar Quantidade"
+                                  >
+                                    <Pencil size={12} />
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-8 py-5 text-sm font-mono text-slate-400 whitespace-nowrap">R$ {asset.avgPrice.toFixed(2)}</td>
+                            <td className="px-8 py-5 text-sm font-mono text-emerald-400 font-medium whitespace-nowrap">R$ {currentPrice.toFixed(2)}</td>
+                            <td className="px-8 py-5 text-sm whitespace-nowrap">
+                              <span className={cn(
+                                "text-xs font-bold px-2 py-1 rounded inline-flex items-center gap-1",
+                                profitLoss > 0 ? "bg-emerald-500/10 text-emerald-400" : profitLoss < 0 ? "bg-rose-500/10 text-rose-400" : "bg-slate-500/10 text-slate-400"
+                              )}>
+                                {profitLoss > 0 ? <TrendingUp size={12} /> : profitLoss < 0 ? <TrendingDown size={12} /> : null}
+                                {profitLoss > 0 ? '+' : ''}{profitLoss.toFixed(2)}%
+                              </span>
+                            </td>
+                            <td className="px-8 py-5 text-sm font-bold text-white whitespace-nowrap">R$ {equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td className="px-8 py-5 text-right flex items-center justify-end gap-2">
+                              <button 
+                                onClick={() => {
+                                  setSelectedTicker(asset.ticker);
+                                  setActiveTab('analysis');
+                                  runAnalysis({ quantity: asset.quantity, avgPrice: asset.avgPrice }, asset.ticker);
+                                }}
+                                className="w-8 h-8 rounded-full flex items-center justify-center text-emerald-400 hover:bg-emerald-400/10 transition-all group-hover:opacity-100"
+                                title="Análise IA Personalizada"
+                              >
+                                <BrainCircuit size={16} />
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  const newAssets = assets.filter((_, i) => i !== idx);
+                                  saveAssets(newAssets);
+                                }}
+                                className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-40 hover:opacity-100"
+                                title="Excluir Ativo"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            </td>
+                          </tr>
+                         );
+                       })}
+                       {assets.length === 0 && (
+                         <tr>
+                           <td colSpan={8} className="px-8 py-16 text-center text-slate-500 italic font-medium">
+                             Sua carteira está vazia. Comece adicionando seu primeiro ativo.
+                           </td>
+                         </tr>
+                       )}
+                       {assets.length > 0 && assets.filter(asset => {
+                         const query = assetSearchQuery.toLowerCase();
+                         return asset.ticker.toLowerCase().includes(query) || 
+                                asset.type.toLowerCase().includes(query);
+                       }).length === 0 && (
+                         <tr>
+                           <td colSpan={8} className="px-8 py-16 text-center text-slate-500 italic font-medium">
+                             Nenhum ativo corresponde à busca "{assetSearchQuery}".
+                           </td>
+                         </tr>
+                       )}
                     </tbody>
                   </table>
                 </div>
@@ -985,6 +1292,62 @@ export default function App() {
                         onChange={(e) => setUserContext(e.target.value)}
                         className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white placeholder:text-slate-600 transition-all font-medium text-sm resize-none"
                       />
+                    </div>
+
+                    <div className="w-full space-y-2 text-left">
+                      <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Nível de Detalhe da Análise</label>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setAnalysisLevel('básico')}
+                          className={cn(
+                            "p-4 rounded-2xl border text-left transition-all",
+                            analysisLevel === 'básico' 
+                              ? "bg-emerald-500/10 border-emerald-500/50 shadow-md shadow-emerald-500/5" 
+                              : "bg-white/5 border-white/5 hover:bg-white/10"
+                          )}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className={cn("text-xs font-bold", analysisLevel === 'básico' ? "text-emerald-400" : "text-white")}>Básico</span>
+                            <span className="text-[8px] font-bold text-slate-500 font-mono uppercase">Rápido ⚡</span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 leading-snug">Visão geral direta dos pontos críticos e tendência.</p>
+                        </button>
+                        
+                        <button
+                          type="button"
+                          onClick={() => setAnalysisLevel('intermediário')}
+                          className={cn(
+                            "p-4 rounded-2xl border text-left transition-all",
+                            analysisLevel === 'intermediário' 
+                              ? "bg-emerald-500/10 border-emerald-500/50 shadow-md shadow-emerald-500/5" 
+                              : "bg-white/5 border-white/5 hover:bg-white/10"
+                          )}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className={cn("text-xs font-bold", analysisLevel === 'intermediário' ? "text-emerald-400" : "text-white")}>Intermediário</span>
+                            <span className="text-[8px] font-bold text-emerald-400 font-mono uppercase">Equilibrado ⚖️</span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 leading-snug">Relação ideal de profundidade, riscos e fundamentos.</p>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setAnalysisLevel('avançado')}
+                          className={cn(
+                            "p-4 rounded-2xl border text-left transition-all",
+                            analysisLevel === 'avançado' 
+                              ? "bg-emerald-500/10 border-emerald-500/50 shadow-md shadow-emerald-500/5" 
+                              : "bg-white/5 border-white/5 hover:bg-white/10"
+                          )}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className={cn("text-xs font-bold", analysisLevel === 'avançado' ? "text-emerald-400" : "text-white")}>Avançado</span>
+                            <span className="text-[8px] font-bold text-amber-500 font-mono uppercase">Completo 🧠</span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 leading-snug">Detalhamento máximo, valuation, macro e guias estratégicos.</p>
+                        </button>
+                      </div>
                     </div>
 
                     <button 
@@ -1095,6 +1458,149 @@ export default function App() {
                       </motion.div>
                     )}
                   </AnimatePresence>
+
+                  {/* News Section */}
+                  <div className="mt-12 rounded-3xl border border-white/10 bg-white/5 backdrop-blur-md overflow-hidden">
+                    <div className="p-6 border-b border-white/10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-400">
+                          <Newspaper size={20} />
+                        </div>
+                        <div>
+                          <h4 className="text-base font-bold text-white leading-tight">Últimas Notícias & Sentimento</h4>
+                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 inline-block">Sintetizado para {selectedTicker}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 self-end sm:self-auto">
+                        <button
+                          onClick={() => setShowNewsFilters(!showNewsFilters)}
+                          className={cn(
+                            "flex items-center gap-2 px-3 py-1.5 rounded-xl border text-[10px] font-bold uppercase tracking-wider transition-all",
+                            showNewsFilters || newsKeywords || newsSources
+                              ? "bg-blue-500/10 border-blue-500/30 text-blue-400"
+                              : "border-white/10 text-slate-400 hover:text-white hover:border-white/20"
+                          )}
+                          title="Filtros de notícias"
+                        >
+                          <Filter size={12} />
+                          Filtros
+                        </button>
+                        <button
+                          onClick={() => fetchAnalysisNews(selectedTicker)}
+                          disabled={isFetchingAnalysisNews}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-700 disabled:text-slate-500 rounded-xl text-[10px] text-white font-bold uppercase tracking-wider transition-all shadow-lg shadow-blue-500/10"
+                        >
+                          <RefreshCw size={12} className={cn(isFetchingAnalysisNews && "animate-spin")} />
+                          Atualizar
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Filters collapsable panel */}
+                    <AnimatePresence>
+                      {showNewsFilters && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: 'auto', opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          className="overflow-hidden border-b border-white/10 bg-black/20 p-6 space-y-4"
+                        >
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                              <label className="text-[10px] text-slate-400 font-bold uppercase tracking-widest block mb-2">Palavras-chave / Tópicos</label>
+                              <input
+                                type="text"
+                                placeholder="Ex: dividendos, fusão, balanço..."
+                                value={newsKeywords}
+                                onChange={(e) => setNewsKeywords(e.target.value)}
+                                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-slate-400 font-bold uppercase tracking-widest block mb-2">Filtrar por Fontes</label>
+                              <input
+                                type="text"
+                                placeholder="Ex: Valor Econômico, InfoMoney, Bloomberg..."
+                                value={newsSources}
+                                onChange={(e) => setNewsSources(e.target.value)}
+                                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex justify-end">
+                            <button
+                              onClick={() => {
+                                fetchAnalysisNews(selectedTicker);
+                                setShowNewsFilters(false);
+                              }}
+                              className="px-4 py-1.5 bg-blue-500/20 text-blue-400 border border-blue-500/30 hover:bg-blue-500/30 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all"
+                            >
+                              Aplicar Filtros
+                            </button>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    {/* Content Section */}
+                    <div className="p-8">
+                      {isFetchingAnalysisNews ? (
+                        <div className="py-12 flex flex-col items-center justify-center text-slate-400">
+                          <Loader2 size={32} className="text-blue-500 animate-spin mb-4" />
+                          <p className="text-sm font-medium">Buscando e sintetizando as notícias mais recentes...</p>
+                          <p className="text-[10px] text-slate-500 mt-2 font-mono">Processando sentimentos com IA via Gemini-3-Flash</p>
+                        </div>
+                      ) : activeAnalysisNews ? (
+                        <div className="prose prose-invert max-w-none prose-sm prose-p:text-slate-300 prose-headings:text-white prose-strong:text-white prose-li:text-slate-300">
+                          <Markdown
+                            components={{
+                              li: ({node, ...props}) => {
+                                // Add sentiment coloring dynamically to the list items containing positive, negative, or neutral mentions
+                                const text = props.children?.toString() || '';
+                                const isPositive = /positivo|otimista|alta|compra/i.test(text);
+                                const isNegative = /negativo|pessimista|queda|venda/i.test(text);
+                                
+                                return (
+                                  <li {...props} className="mb-4 pl-2 relative border-l-2 border-white/10 hover:border-blue-500/50 transition-all">
+                                    <div className="flex items-start gap-2 flex-wrap">
+                                      {isPositive && (
+                                        <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">ALTA</span>
+                                      )}
+                                      {isNegative && (
+                                        <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-rose-500/20 text-rose-400 border border-rose-500/30">BAIXA</span>
+                                      )}
+                                      <span>{props.children}</span>
+                                    </div>
+                                  </li>
+                                );
+                              }
+                            }}
+                          >
+                            {activeAnalysisNews}
+                          </Markdown>
+                        </div>
+                      ) : (
+                        <div className="py-12 flex flex-col items-center justify-center text-center text-slate-500">
+                          <Newspaper size={40} className="mb-3 opacity-20 text-blue-400" />
+                          <p className="text-sm font-semibold">Sem notícias carregadas para {selectedTicker}</p>
+                          <p className="text-xs text-slate-600 mt-1 max-w-md">Para carregar ou renovar os fatos relevantes e análises de notícias consolidadas do ativo, clique no botão de atualizar.</p>
+                          <button
+                            onClick={() => fetchAnalysisNews(selectedTicker)}
+                            className="mt-4 px-4 py-2 bg-white/5 border border-white/10 hover:bg-white/10 rounded-xl text-xs font-bold uppercase tracking-wider text-white transition-all"
+                          >
+                            Carregar Notícias
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="bg-blue-500/5 border-t border-white/5 p-4 text-center">
+                      <p className="text-[10px] text-blue-400/80 font-medium uppercase tracking-widest leading-relaxed">
+                        ⚡ Notícias consolidadas e curadas em tempo real com base no sentimento de mercado da B3.
+                      </p>
+                    </div>
+                  </div>
 
                   <div className="mt-12 p-6 bg-rose-500/5 rounded-3xl border border-rose-500/10 flex gap-4 items-start">
                     <AlertCircle className="text-rose-400 shrink-0 mt-0.5" size={20} />
