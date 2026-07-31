@@ -21,7 +21,8 @@ import {
   Check,
   Newspaper,
   RefreshCw,
-  Filter
+  Filter,
+  Globe
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -83,6 +84,7 @@ export default function App() {
   const [analysisHistory, setAnalysisHistory] = useState<HistoricalAnalysis[]>([]);
   const [alerts, setAlerts] = useState<StockAlert[]>([]);
   const [isAddingAlert, setIsAddingAlert] = useState(false);
+  const [alertToDelete, setAlertToDelete] = useState<StockAlert | null>(null);
   const [isFetchingAlertNews, setIsFetchingAlertNews] = useState<string | null>(null);
   const [alertNews, setAlertNews] = useState<{ [id: string]: string }>({});
   const [alertForm, setAlertForm] = useState<Omit<StockAlert, 'id' | 'createdAt' | 'active'>>({
@@ -113,6 +115,7 @@ export default function App() {
   const [activeAnalysisNews, setActiveAnalysisNews] = useState<string | null>(null);
   const [isFetchingAnalysisNews, setIsFetchingAnalysisNews] = useState(false);
   const [newsKeywords, setNewsKeywords] = useState('');
+  const [newsExcludeKeywords, setNewsExcludeKeywords] = useState('');
   const [newsSources, setNewsSources] = useState('');
   const [showNewsFilters, setShowNewsFilters] = useState(false);
 
@@ -128,6 +131,25 @@ export default function App() {
   const [editingAssetIdx, setEditingAssetIdx] = useState<number | null>(null);
   const [editQuantity, setEditQuantity] = useState<string>('');
   const [assetSearchQuery, setAssetSearchQuery] = useState<string>('');
+
+  // Positive Cryptos State
+  const [positiveCryptos, setPositiveCryptos] = useState<{ticker: string, name: string, price: number, variation: number, variation30m?: number, variation24hAbs?: number, high24h?: number, low24h?: number, evolution?: number[]}[]>([]);
+  const [isFetchingCryptos, setIsFetchingCryptos] = useState(false);
+  const [showCryptosModal, setShowCryptosModal] = useState(false);
+
+  const fetchPositiveCryptos = async () => {
+    setIsFetchingCryptos(true);
+    setShowCryptosModal(true);
+    try {
+      const res = await fetch('/api/positive-cryptos');
+      const data = await res.json();
+      setPositiveCryptos(data);
+    } catch (err) {
+      console.error("Error fetching positive cryptos", err);
+    } finally {
+      setIsFetchingCryptos(false);
+    }
+  };
 
   const fetchCurrentPrice = async (ticker: string) => {
     if (!ticker || ticker.length < 4) return;
@@ -146,14 +168,80 @@ export default function App() {
   };
 
   const [isRefreshingPrices, setIsRefreshingPrices] = useState(false);
+  const [lastPricesUpdate, setLastPricesUpdate] = useState<string | null>(null);
+
+  // Internet Financial Market Search State
+  const [marketSearchQuery, setMarketSearchQuery] = useState('');
+  const [isSearchingMarketAsset, setIsSearchingMarketAsset] = useState(false);
+  const [marketSearchResult, setMarketSearchResult] = useState<{
+    ticker: string;
+    name: string;
+    price: number;
+    type: string;
+    variation24h: number;
+    currency: string;
+    description: string;
+    source: string;
+    updatedAt?: string;
+  } | null>(null);
+
+  // Auto fetch real market price when typing ticker in "Novo Ativo" modal
+  useEffect(() => {
+    if (!isRegistering || !formData.ticker || formData.ticker.trim().length < 3) return;
+    const timer = setTimeout(() => {
+      searchAssetInMarket(formData.ticker);
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [formData.ticker, isRegistering]);
+
+  const searchAssetInMarket = async (queryStr: string) => {
+    if (!queryStr || queryStr.trim().length < 2) return;
+    setIsSearchingMarketAsset(true);
+    setMarketSearchResult(null);
+    try {
+      const res = await fetch(`/api/search-asset-market?query=${encodeURIComponent(queryStr.trim())}`);
+      const data = await res.json();
+      if (data && data.price) {
+        setMarketSearchResult(data);
+        setFormData(prev => ({
+          ...prev,
+          ticker: data.ticker ? data.ticker.toUpperCase() : prev.ticker,
+          avgPrice: data.price || prev.avgPrice,
+          type: data.type || prev.type
+        }));
+      }
+    } catch (err) {
+      console.error("Error searching asset in market", err);
+    } finally {
+      setIsSearchingMarketAsset(false);
+    }
+  };
 
   const refreshAllPrices = async () => {
     if (assets.length === 0) return;
     setIsRefreshingPrices(true);
     try {
+      let batchPricesMap: Record<string, number> = {};
+      try {
+        const batchRes = await fetch('/api/batch-refresh-prices', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assets })
+        });
+        const batchData = await batchRes.json();
+        if (batchData.prices) {
+          batchPricesMap = batchData.prices;
+        }
+      } catch (e) {
+        console.warn("Batch refresh endpoint error, falling back to individual queries", e);
+      }
+
       const updatedAssets = await Promise.all(
         assets.map(async (asset) => {
           try {
+            if (batchPricesMap[asset.ticker] && batchPricesMap[asset.ticker] > 0) {
+              return { ...asset, currentPrice: batchPricesMap[asset.ticker] };
+            }
             const res = await fetch(`/api/current-price/${asset.ticker}`);
             const data = await res.json();
             if (data.price > 0) {
@@ -166,6 +254,7 @@ export default function App() {
         })
       );
       saveAssets(updatedAssets);
+      setLastPricesUpdate(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
     } catch (err) {
       console.error("Failed to refresh prices", err);
     } finally {
@@ -272,7 +361,7 @@ export default function App() {
     }
   };
 
-  const fetchAnalysisNews = async (ticker: string, keywordsOverride?: string, sourcesOverride?: string) => {
+  const fetchAnalysisNews = async (ticker: string, keywordsOverride?: string, excludeKeywordsOverride?: string, sourcesOverride?: string) => {
     setIsFetchingAnalysisNews(true);
     try {
       const res = await fetch('/api/fetch-news', {
@@ -281,6 +370,7 @@ export default function App() {
         body: JSON.stringify({
           ticker,
           keywords: keywordsOverride !== undefined ? keywordsOverride : newsKeywords,
+          excludeKeywords: excludeKeywordsOverride !== undefined ? excludeKeywordsOverride : newsExcludeKeywords,
           sources: sourcesOverride !== undefined ? sourcesOverride : newsSources
         })
       });
@@ -510,6 +600,30 @@ export default function App() {
     'Cripto': '#ec4899'
   };
 
+  const triggeredAlertsCount = useMemo(() => {
+    return alerts.filter(alert => {
+      if (!alert.active) return false;
+      const matchingAsset = assets.find(a => a.ticker.toUpperCase() === alert.ticker.toUpperCase());
+      if (!matchingAsset) return false;
+      const currentPrice = matchingAsset.currentPrice || matchingAsset.avgPrice;
+      if (!currentPrice) return false;
+      
+      if (alert.type === 'price') {
+        const isAbove = alert.condition === 'above';
+        const threshold = alert.value || 0;
+        return isAbove ? currentPrice >= threshold : currentPrice <= threshold;
+      }
+      
+      if (alert.type === 'variation') {
+        const matchingVar = variationData.find(v => v.ticker.toUpperCase() === alert.ticker.toUpperCase());
+        if (matchingVar) {
+          return Math.abs(matchingVar.variation) >= (alert.value || 0);
+        }
+      }
+      return false;
+    }).length;
+  }, [alerts, assets, variationData]);
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-emerald-500 selection:text-slate-950 relative overflow-hidden">
       {/* Background Mesh Gradients */}
@@ -565,20 +679,34 @@ export default function App() {
             <button 
               onClick={() => setActiveTab('alerts')}
               className={cn(
-                "px-4 py-1.5 rounded-lg text-sm font-medium transition-all",
+                "px-4 py-1.5 rounded-lg text-sm font-medium transition-all flex items-center gap-1.5 relative",
                 activeTab === 'alerts' ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-white"
               )}
             >
               Alertas
+              {triggeredAlertsCount > 0 && (
+                <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-black text-white animate-pulse">
+                  {triggeredAlertsCount}
+                </span>
+              )}
             </button>
           </nav>
-          <button 
-            onClick={() => setIsRegistering(true)}
-            className="flex items-center gap-2 bg-emerald-500 text-slate-950 px-5 py-2.5 rounded-full text-sm font-bold hover:bg-emerald-400 transition-all hover:scale-105 active:scale-95 shadow-lg shadow-emerald-500/20"
-          >
-            <Plus size={16} />
-            Novo Ativo
-          </button>
+          <div className="flex gap-3">
+            <button 
+              onClick={() => fetchPositiveCryptos()}
+              className="flex items-center gap-2 bg-pink-500/20 text-pink-400 border border-pink-500/50 px-5 py-2 rounded-full text-sm font-bold hover:bg-pink-500/30 transition-all hover:scale-105 active:scale-95"
+            >
+              <TrendingUp size={16} />
+              Criptos em Alta
+            </button>
+            <button 
+              onClick={() => setIsRegistering(true)}
+              className="flex items-center gap-2 bg-emerald-500 text-slate-950 px-5 py-2.5 rounded-full text-sm font-bold hover:bg-emerald-400 transition-all hover:scale-105 active:scale-95 shadow-lg shadow-emerald-500/20"
+            >
+              <Plus size={16} />
+              Novo Ativo
+            </button>
+          </div>
         </div>
       </header>
 
@@ -592,6 +720,125 @@ export default function App() {
               exit={{ opacity: 0, y: -10 }}
               className="space-y-8"
             >
+              {/* Internet Market Asset Search Widget */}
+              <div className="bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 backdrop-blur-md p-6 rounded-[2rem] border border-emerald-500/20 shadow-xl relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 blur-[80px] rounded-full pointer-events-none" />
+                <div className="relative z-10 space-y-4">
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
+                        <span className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-400">Pesquisa em Tempo Real na Internet 🌐</span>
+                      </div>
+                      <h3 className="text-xl font-bold text-white tracking-tight">Buscar Cotação de Ativos no Mercado Financeiro</h3>
+                    </div>
+                    <span className="text-[10px] text-slate-400 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl font-mono">
+                      B3 • Binance • Yahoo Finance • Google Search
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                      <input 
+                        type="text" 
+                        placeholder="Digite qualquer ativo ou empresa (ex: PETR4, VALE3, HGLG11, Bitcoin, Apple, NVDA)..."
+                        value={marketSearchQuery}
+                        onChange={(e) => setMarketSearchQuery(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && searchAssetInMarket(marketSearchQuery)}
+                        className="w-full pl-11 pr-4 py-3.5 bg-slate-950/80 border border-white/15 rounded-2xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 font-medium transition-all"
+                      />
+                      {marketSearchQuery && (
+                        <button 
+                          onClick={() => { setMarketSearchQuery(''); setMarketSearchResult(null); }}
+                          className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                        >
+                          <X size={16} />
+                        </button>
+                      )}
+                    </div>
+                    <button 
+                      onClick={() => searchAssetInMarket(marketSearchQuery)}
+                      disabled={isSearchingMarketAsset || !marketSearchQuery.trim()}
+                      className="px-6 py-3.5 bg-emerald-500 text-slate-950 font-black rounded-2xl hover:bg-emerald-400 disabled:opacity-50 transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 shrink-0 text-sm"
+                    >
+                      {isSearchingMarketAsset ? (
+                        <>
+                          <Loader2 className="animate-spin" size={18} />
+                          <span>Pesquisando na Internet...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Search size={18} />
+                          <span>Pesquisar Mercado 🌐</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Market Search Result Box */}
+                  {marketSearchResult && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="mt-4 p-5 bg-slate-950/90 border border-emerald-500/30 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-2xl"
+                    >
+                      <div className="space-y-1 max-w-xl">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-mono font-black text-lg text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-lg border border-emerald-500/20">
+                            {marketSearchResult.ticker}
+                          </span>
+                          <span className="text-white font-bold text-base">{marketSearchResult.name}</span>
+                          <span className="text-[10px] bg-white/10 text-slate-300 px-2 py-0.5 rounded-md font-semibold">
+                            {marketSearchResult.type}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-400 leading-relaxed">{marketSearchResult.description}</p>
+                        <div className="flex items-center gap-3 text-[10px] text-slate-500 font-mono">
+                          <span>Fonte: {marketSearchResult.source}</span>
+                          <span>•</span>
+                          <span>Atualizado online em {new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-4 w-full md:w-auto justify-between md:justify-end border-t md:border-t-0 border-white/10 pt-3 md:pt-0">
+                        <div className="text-right">
+                          <div className="text-xs text-slate-400 uppercase font-black tracking-wider">Cotação Real</div>
+                          <div className="text-2xl font-black font-mono text-white">
+                            {marketSearchResult.currency === 'USD' ? 'USD ' : 'R$ '}
+                            {marketSearchResult.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
+                          </div>
+                          {marketSearchResult.variation24h !== undefined && (
+                            <span className={cn(
+                              "text-xs font-bold font-mono inline-flex items-center gap-0.5",
+                              marketSearchResult.variation24h >= 0 ? "text-emerald-400" : "text-rose-400"
+                            )}>
+                              {marketSearchResult.variation24h >= 0 ? '+' : ''}{marketSearchResult.variation24h}% (24h)
+                            </span>
+                          )}
+                        </div>
+
+                        <button 
+                          onClick={() => {
+                            setFormData({
+                              ticker: marketSearchResult.ticker,
+                              quantity: 1,
+                              avgPrice: marketSearchResult.price,
+                              type: marketSearchResult.type || 'Ação (B3)'
+                            });
+                            setIsRegistering(true);
+                          }}
+                          className="px-4 py-3 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 font-bold border border-emerald-500/40 rounded-xl text-xs transition-all flex items-center gap-1.5 shrink-0"
+                        >
+                          <Plus size={16} />
+                          <span>Adicionar Ativo</span>
+                        </button>
+                      </div>
+                    </motion.div>
+                  )}
+                </div>
+              </div>
+
               {/* Summary Cards */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                 <div className="bg-white/5 backdrop-blur-md p-6 rounded-3xl border border-white/10 shadow-sm transition-all hover:bg-white/10">
@@ -888,6 +1135,16 @@ export default function App() {
                       {variationData.length > 0 ? (
                         <ResponsiveContainer width="100%" height="100%">
                           <BarChart data={variationData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                            <defs>
+                              <linearGradient id="variationPos" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor="#10b981" stopOpacity={0.4} />
+                                <stop offset="100%" stopColor="#10b981" stopOpacity={0.05} />
+                              </linearGradient>
+                              <linearGradient id="variationNeg" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor="#f43f5e" stopOpacity={0.4} />
+                                <stop offset="100%" stopColor="#f43f5e" stopOpacity={0.05} />
+                              </linearGradient>
+                            </defs>
                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
                             <XAxis 
                               dataKey="ticker" 
@@ -902,15 +1159,69 @@ export default function App() {
                               tickFormatter={(val) => `${val > 0 ? '+' : ''}${val}%`}
                             />
                             <Tooltip 
-                              cursor={{ fill: 'rgba(255,255,255,0.05)' }}
-                              contentStyle={{
-                                backgroundColor: 'rgba(15, 23, 42, 0.9)', 
-                                borderRadius: '12px', 
-                                border: '1px solid rgba(255,255,255,0.1)',
-                                backdropFilter: 'blur(10px)',
-                                color: '#fff'
+                              cursor={{ fill: 'rgba(255,255,255,0.03)' }}
+                              content={({ active, payload }) => {
+                                if (active && payload && payload.length) {
+                                  const data = payload[0].payload;
+                                  const isPositive = data.variation >= 0;
+                                  const matchingAsset = assets.find(a => a.ticker.toUpperCase() === data.ticker.toUpperCase());
+                                  
+                                  return (
+                                    <div className="bg-slate-900/95 border border-white/10 p-4 rounded-2xl shadow-xl backdrop-blur-md min-w-[220px]">
+                                      <div className="flex items-center justify-between gap-4 mb-2">
+                                        <span className="font-mono font-bold text-white tracking-wider text-base">
+                                          {data.ticker}
+                                        </span>
+                                        <span className={cn(
+                                          "text-xs px-2.5 py-1 rounded-lg font-bold font-mono",
+                                          isPositive ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/25" : "bg-rose-500/10 text-rose-400 border border-rose-500/25"
+                                        )}>
+                                          {isPositive ? '+' : ''}{data.variation.toFixed(2)}%
+                                        </span>
+                                      </div>
+                                      
+                                      <div className="h-[1px] bg-white/5 my-2" />
+                                      
+                                      <div className="space-y-1.5 text-xs text-slate-300">
+                                        <div className="flex justify-between items-center">
+                                          <span className="text-slate-500 font-medium">Período:</span>
+                                          <span className="text-white font-semibold uppercase tracking-wider text-[10px] bg-white/5 px-2 py-0.5 rounded border border-white/5">
+                                            {variationPeriod === 'daily' ? 'Diário' : variationPeriod === 'weekly' ? 'Semanal' : 'Mensal'}
+                                          </span>
+                                        </div>
+                                        
+                                        {matchingAsset ? (
+                                          <>
+                                            <div className="flex justify-between items-center">
+                                              <span className="text-slate-500 font-medium">Classe:</span>
+                                              <span className="text-white font-medium bg-white/5 px-2 py-0.5 rounded text-[10px]">{matchingAsset.type}</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                              <span className="text-slate-500 font-medium">Qtd. Alocada:</span>
+                                              <span className="text-white font-medium font-mono">{matchingAsset.quantity}</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                              <span className="text-slate-500 font-medium">Preço Médio:</span>
+                                              <span className="text-slate-300 font-mono">R$ {matchingAsset.avgPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+                                            </div>
+                                            <div className="flex justify-between pt-1 border-t border-white/5 font-semibold text-emerald-400">
+                                              <span className="text-slate-500 font-medium">Patrimônio:</span>
+                                              <span className="font-mono text-white">
+                                                R$ {((matchingAsset.currentPrice || matchingAsset.avgPrice) * matchingAsset.quantity).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                              </span>
+                                            </div>
+                                          </>
+                                        ) : (
+                                          <div className="mt-2 p-2 rounded-xl bg-amber-500/5 border border-amber-500/10 text-[10px] text-amber-500/90 leading-normal">
+                                            ⚠️ Ativo de simulação. Clique em "Novo Ativo" para adicionar posições reais!
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                }
+                                return null;
                               }}
-                              formatter={(value: number) => [`${value > 0 ? '+' : ''}${value}%`, 'Variação']}
                             />
                             <Bar 
                               dataKey="variation" 
@@ -923,7 +1234,9 @@ export default function App() {
                                 return (
                                   <Cell 
                                     key={`cell-${idx}`} 
-                                    fill={isPositive ? '#10b981' : '#f43f5e'} 
+                                    fill={isPositive ? 'url(#variationPos)' : 'url(#variationNeg)'}
+                                    stroke={isPositive ? '#10b981' : '#f43f5e'}
+                                    strokeWidth={1.5}
                                   />
                                 );
                               })}
@@ -1095,18 +1408,27 @@ export default function App() {
                         </button>
                       )}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
                       <button
                         onClick={refreshAllPrices}
                         disabled={isRefreshingPrices || assets.length === 0}
-                        className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 disabled:bg-slate-700/50 disabled:text-slate-500 rounded-xl text-[10px] text-emerald-400 font-bold uppercase tracking-wider transition-all"
+                        title="Busca o preço atual de cada ativo no mercado financeiro na Internet em tempo real"
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3.5 py-2 bg-emerald-500/20 border border-emerald-500/40 hover:bg-emerald-500/30 disabled:bg-slate-800 disabled:text-slate-500 rounded-xl text-[10px] text-emerald-300 font-black uppercase tracking-wider transition-all shadow-md shadow-emerald-500/10"
                       >
-                        <RefreshCw size={11} className={cn(isRefreshingPrices && "animate-spin")} />
-                        {isRefreshingPrices ? "Atualizando..." : "Atualizar Tempo Real"}
+                        <RefreshCw size={12} className={cn(isRefreshingPrices && "animate-spin text-emerald-400")} />
+                        {isRefreshingPrices ? "Pesquisando na Internet..." : "Atualizar na Internet 🌐"}
                       </button>
-                      <div className="px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase tracking-wider text-center">
-                        Mercado Aberto
-                      </div>
+
+                      {lastPricesUpdate ? (
+                        <div className="px-2.5 py-1.5 rounded-xl bg-slate-900 border border-white/10 text-slate-300 text-[10px] font-mono flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>Atu. {lastPricesUpdate}</span>
+                        </div>
+                      ) : (
+                        <div className="px-2.5 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase tracking-wider text-center">
+                          Mercado Aberto
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1477,7 +1799,7 @@ export default function App() {
                           onClick={() => setShowNewsFilters(!showNewsFilters)}
                           className={cn(
                             "flex items-center gap-2 px-3 py-1.5 rounded-xl border text-[10px] font-bold uppercase tracking-wider transition-all",
-                            showNewsFilters || newsKeywords || newsSources
+                            showNewsFilters || newsKeywords || newsExcludeKeywords || newsSources
                               ? "bg-blue-500/10 border-blue-500/30 text-blue-400"
                               : "border-white/10 text-slate-400 hover:text-white hover:border-white/20"
                           )}
@@ -1506,29 +1828,52 @@ export default function App() {
                           exit={{ height: 0, opacity: 0 }}
                           className="overflow-hidden border-b border-white/10 bg-black/20 p-6 space-y-4"
                         >
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <div>
-                              <label className="text-[10px] text-slate-400 font-bold uppercase tracking-widest block mb-2">Palavras-chave / Tópicos</label>
+                              <label className="text-[10px] text-slate-400 font-bold uppercase tracking-widest block mb-2">Palavras-chave a Incluir</label>
                               <input
                                 type="text"
-                                placeholder="Ex: dividendos, fusão, balanço..."
+                                placeholder="dividendos, fusão, balanço..."
                                 value={newsKeywords}
                                 onChange={(e) => setNewsKeywords(e.target.value)}
                                 className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
                               />
                             </div>
                             <div>
+                              <label className="text-[10px] text-slate-400 font-bold uppercase tracking-widest block mb-2">Palavras-chave a Excluir</label>
+                              <input
+                                type="text"
+                                placeholder="processo, multa, escândalo..."
+                                value={newsExcludeKeywords}
+                                onChange={(e) => setNewsExcludeKeywords(e.target.value)}
+                                className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-rose-500 focus:border-rose-500"
+                              />
+                            </div>
+                            <div>
                               <label className="text-[10px] text-slate-400 font-bold uppercase tracking-widest block mb-2">Filtrar por Fontes</label>
                               <input
                                 type="text"
-                                placeholder="Ex: Valor Econômico, InfoMoney, Bloomberg..."
+                                placeholder="Ex: Valor Econômico, InfoMoney..."
                                 value={newsSources}
                                 onChange={(e) => setNewsSources(e.target.value)}
                                 className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
                               />
                             </div>
                           </div>
-                          <div className="flex justify-end">
+                          <div className="flex justify-end gap-3">
+                            {(newsKeywords || newsExcludeKeywords || newsSources) && (
+                              <button
+                                onClick={() => {
+                                  setNewsKeywords('');
+                                  setNewsExcludeKeywords('');
+                                  setNewsSources('');
+                                  fetchAnalysisNews(selectedTicker, '', '', '');
+                                }}
+                                className="px-4 py-1.5 bg-white/5 text-slate-400 border border-white/10 hover:bg-white/10 hover:text-white rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all"
+                              >
+                                Limpar
+                              </button>
+                            )}
                             <button
                               onClick={() => {
                                 fetchAnalysisNews(selectedTicker);
@@ -1675,70 +2020,138 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 gap-4">
-                {alerts.map((alert) => (
-                  <div key={alert.id} className="bg-white/5 backdrop-blur-md p-6 rounded-[2rem] border border-white/10 flex items-center justify-between group">
-                    <div className="flex items-center gap-6">
-                      <div className={cn(
-                        "w-12 h-12 rounded-2xl flex items-center justify-center font-bold text-lg shadow-inner",
-                        alert.active ? "bg-emerald-500/10 text-emerald-400" : "bg-white/5 text-slate-600"
-                      )}>
-                        {alert.ticker.charAt(0)}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-3">
-                          <h4 className="text-xl font-bold text-white tracking-wider">{alert.ticker}</h4>
-                          <span className={cn(
-                            "px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest",
-                            alert.type === 'price' ? "bg-blue-500/20 text-blue-400" : 
-                            alert.type === 'variation' ? "bg-indigo-500/20 text-indigo-400" : 
-                            "bg-amber-500/20 text-amber-400"
-                          )}>
-                            {alert.type === 'price' ? 'Preço Alvo' : alert.type === 'variation' ? 'Variação' : 'Notícias'}
-                          </span>
+                {alerts.map((alert) => {
+                  const matchingAsset = assets.find(a => a.ticker.toUpperCase() === alert.ticker.toUpperCase());
+                  const currentPrice = matchingAsset ? (matchingAsset.currentPrice || matchingAsset.avgPrice) : null;
+                  const matchingVar = variationData.find(v => v.ticker.toUpperCase() === alert.ticker.toUpperCase());
+                  const currentVar = matchingVar ? matchingVar.variation : null;
+
+                  let isTriggered = false;
+
+                  if (alert.active) {
+                    if (alert.type === 'price' && currentPrice !== null) {
+                      const threshold = alert.value || 0;
+                      if (alert.condition === 'above') {
+                        isTriggered = currentPrice >= threshold;
+                      } else {
+                        isTriggered = currentPrice <= threshold;
+                      }
+                    } else if (alert.type === 'variation' && currentVar !== null) {
+                      isTriggered = Math.abs(currentVar) >= (alert.value || 0);
+                    }
+                  }
+
+                  return (
+                    <div key={alert.id} className={cn(
+                      "bg-white/5 backdrop-blur-md p-6 rounded-[2rem] border transition-all flex flex-col md:flex-row md:items-center justify-between gap-4 group",
+                      isTriggered ? "border-rose-500/40 bg-rose-500/5 shadow-lg shadow-rose-500/5" : "border-white/10"
+                    )}>
+                      <div className="flex items-center gap-6">
+                        <div className={cn(
+                          "w-12 h-12 rounded-2xl flex items-center justify-center font-bold text-lg shadow-inner shrink-0",
+                          isTriggered ? "bg-rose-500/10 text-rose-400" :
+                          alert.active ? "bg-emerald-500/10 text-emerald-400" : "bg-white/5 text-slate-600"
+                        )}>
+                          {alert.ticker.charAt(0)}
                         </div>
-                        <p className="text-slate-400 text-xs mt-1">
-                          {alert.type === 'price' ? `Notificar quando ${alert.condition === 'above' ? 'subir acima de' : 'cair abaixo de'} R$ ${alert.value}` :
-                           alert.type === 'variation' ? `Notificar se variar mais de ${alert.value}%` :
-                           `Monitorando: ${alert.keywords || 'Geral'} ${alert.sources ? `(Fontes: ${alert.sources})` : ''}`}
-                        </p>
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h4 className="text-xl font-bold text-white tracking-wider font-mono">{alert.ticker}</h4>
+                            <span className={cn(
+                              "px-2.5 py-0.5 rounded-lg text-[8px] font-black uppercase tracking-widest",
+                              alert.type === 'price' ? "bg-blue-500/20 text-blue-400 border border-blue-500/20" : 
+                              alert.type === 'variation' ? "bg-indigo-500/20 text-indigo-400 border border-indigo-500/20" : 
+                              "bg-amber-500/20 text-amber-400 border border-amber-500/20"
+                            )}>
+                              {alert.type === 'price' ? 'Preço Alvo' : alert.type === 'variation' ? 'Variação' : 'Notícias'}
+                            </span>
+                            {isTriggered && (
+                              <span className="px-2.5 py-0.5 rounded-lg text-[8px] font-black uppercase tracking-widest bg-rose-500 text-white animate-bounce flex items-center gap-1">
+                                <span>ATINGIDO 🔔</span>
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-slate-400 text-xs mt-1 leading-normal">
+                            {alert.type === 'price' ? (
+                              <span>
+                                Notificar quando {alert.condition === 'above' ? 'subir acima de' : 'cair abaixo de'}{" "}
+                                <strong className="text-white font-semibold">R$ {alert.value?.toFixed(2)}</strong>
+                              </span>
+                            ) : alert.type === 'variation' ? (
+                              <span>
+                                Notificar se variar mais de <strong className="text-white font-semibold">{alert.value}%</strong>
+                              </span>
+                            ) : (
+                              <span>
+                                Monitorando notícias: <strong className="text-white font-semibold">{alert.keywords || 'Geral'}</strong> {alert.sources ? `(Fontes: ${alert.sources})` : ''}
+                              </span>
+                            )}
+                          </p>
+
+                          {/* Live metrics / status info */}
+                          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-medium">
+                            {alert.type === 'price' && currentPrice !== null && (
+                              <span className={cn(
+                                "font-mono",
+                                isTriggered ? "text-rose-400" : "text-emerald-400"
+                              )}>
+                                Preço atual: R$ {currentPrice.toFixed(2)}{" "}
+                                <span className="text-slate-500">
+                                  (Falta R$ {Math.abs(currentPrice - (alert.value || 0)).toFixed(2)} para o alvo)
+                                </span>
+                              </span>
+                            )}
+                            {alert.type === 'variation' && currentVar !== null && (
+                              <span className={cn(
+                                "font-mono",
+                                isTriggered ? "text-rose-400" : "text-emerald-400"
+                              )}>
+                                Variação atual: {currentVar > 0 ? '+' : ''}{currentVar.toFixed(2)}%
+                              </span>
+                            )}
+                            {!matchingAsset && alert.type !== 'news' && (
+                              <span className="text-slate-500 italic block">
+                                ⚠️ Ativo não cadastrado no seu portfólio para obter preço real.
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-4">
+                        {alert.type === 'news' && (
+                          <button 
+                            onClick={() => fetchNewsForAlert(alert)}
+                            disabled={isFetchingAlertNews === alert.id}
+                            className="px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest bg-amber-500/10 text-amber-500 border border-amber-500/20 hover:bg-amber-500/20 transition-all flex items-center gap-2"
+                          >
+                            {isFetchingAlertNews === alert.id ? <Loader2 className="animate-spin" size={14} /> : <Search size={14} />}
+                            Checar Notícias
+                          </button>
+                        )}
+                        <button 
+                          onClick={() => {
+                            const newAlerts = alerts.map(a => a.id === alert.id ? { ...a, active: !a.active } : a);
+                            saveAlerts(newAlerts);
+                          }}
+                          className={cn(
+                            "px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all",
+                            alert.active ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-white/5 text-slate-500 border border-white/5"
+                          )}
+                        >
+                          {alert.active ? 'Ativo' : 'Pausado'}
+                        </button>
+                        <button 
+                          onClick={() => setAlertToDelete(alert)}
+                          className="w-10 h-10 rounded-full flex items-center justify-center text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-40 group-hover:opacity-100"
+                          title="Excluir Alerta"
+                        >
+                          <Trash2 size={18} />
+                        </button>
                       </div>
                     </div>
-                    <div className="flex items-center gap-4">
-                      {alert.type === 'news' && (
-                        <button 
-                          onClick={() => fetchNewsForAlert(alert)}
-                          disabled={isFetchingAlertNews === alert.id}
-                          className="px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest bg-amber-500/10 text-amber-500 border border-amber-500/20 hover:bg-amber-500/20 transition-all flex items-center gap-2"
-                        >
-                          {isFetchingAlertNews === alert.id ? <Loader2 className="animate-spin" size={14} /> : <Search size={14} />}
-                          Check News
-                        </button>
-                      )}
-                      <button 
-                        onClick={() => {
-                          const newAlerts = alerts.map(a => a.id === alert.id ? { ...a, active: !a.active } : a);
-                          saveAlerts(newAlerts);
-                        }}
-                        className={cn(
-                          "px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all",
-                          alert.active ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-white/5 text-slate-500 border border-white/5"
-                        )}
-                      >
-                        {alert.active ? 'Ativo' : 'Pausado'}
-                      </button>
-                      <button 
-                        onClick={() => {
-                          const newAlerts = alerts.filter(a => a.id !== alert.id);
-                          saveAlerts(newAlerts);
-                        }}
-                        className="w-10 h-10 rounded-full flex items-center justify-center text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-40 group-hover:opacity-100"
-                        title="Excluir Alerta"
-                      >
-                        <Trash2 size={18} />
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
                 
                 <AnimatePresence>
                   {Object.keys(alertNews).map(id => (
@@ -1783,68 +2196,108 @@ export default function App() {
       {/* Registration Modal */}
       <AnimatePresence>
         {isRegistering && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsRegistering(false)}
-              className="absolute inset-0 bg-slate-950/60 backdrop-blur-md"
+              className="fixed inset-0 bg-slate-950/70 backdrop-blur-md"
             />
             <motion.div 
               initial={{ scale: 0.95, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 20 }}
-              className="relative w-full max-w-md bg-slate-900 border border-white/10 rounded-[2.5rem] shadow-2xl overflow-hidden shadow-emerald-500/5"
+              className="relative w-full max-w-md bg-slate-900 border border-white/10 rounded-[2.5rem] shadow-2xl shadow-emerald-500/10 flex flex-col max-h-[90vh] overflow-hidden my-auto z-10"
             >
-              <div className="p-8 border-b border-white/5 flex justify-between items-center bg-white/5">
-                <h3 className="text-2xl font-bold text-white tracking-tight">Novo Investimento</h3>
-                <button onClick={() => setIsRegistering(false)} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-slate-400 hover:text-white transition-all">
+              <div className="p-6 sm:p-8 border-b border-white/5 flex justify-between items-center bg-white/5 shrink-0">
+                <div>
+                  <h3 className="text-2xl font-bold text-white tracking-tight">Novo Investimento</h3>
+                  <p className="text-xs text-slate-400">Adicione ativos à sua carteira com cotações ao vivo</p>
+                </div>
+                <button onClick={() => setIsRegistering(false)} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-slate-400 hover:text-white transition-all shrink-0">
                   <X size={20} />
                 </button>
               </div>
-              <form onSubmit={handleAddAsset} className="p-8 space-y-6">
+              <form onSubmit={handleAddAsset} className="p-6 sm:p-8 space-y-5 overflow-y-auto flex-1">
+                <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Globe size={16} className="text-emerald-400 shrink-0" />
+                    <span className="font-medium">Cotações pesquisadas em tempo real na Internet</span>
+                  </div>
+                  <span className="text-[9px] bg-emerald-500/20 px-2 py-0.5 rounded-md uppercase font-black tracking-wider text-emerald-400 shrink-0">Live Web</span>
+                </div>
+
                 <div className="space-y-2">
-                  <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Símbolo do Ativo</label>
+                  <div className="flex justify-between items-center mr-1">
+                    <label className="text-[10px] uppercase font-black text-slate-400 tracking-[0.2em] ml-1">Símbolo ou Nome do Ativo</label>
+                    <button
+                      type="button"
+                      onClick={() => searchAssetInMarket(formData.ticker)}
+                      disabled={!formData.ticker || formData.ticker.length < 2 || isSearchingMarketAsset}
+                      className="text-[10px] uppercase font-bold text-emerald-400 hover:text-emerald-300 disabled:text-slate-600 transition-colors flex items-center gap-1"
+                    >
+                      {isSearchingMarketAsset ? "Buscando..." : "Pesquisar na Internet 🌐"}
+                    </button>
+                  </div>
                   <div className="relative">
                     <input 
                       required
                       type="text" 
-                      placeholder="Ex: VALE3"
+                      placeholder="Ex: PETR4, HGLG11, BTC, Apple..."
                       value={formData.ticker}
-                      onChange={(e) => setFormData({...formData, ticker: e.target.value.toUpperCase()})}
-                      onBlur={(e) => fetchCurrentPrice(e.target.value)}
-                      className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white placeholder:text-slate-600 transition-all font-mono font-bold tracking-widest text-lg"
+                      onChange={(e) => {
+                        const val = e.target.value.toUpperCase();
+                        setFormData({...formData, ticker: val});
+                      }}
+                      onBlur={(e) => {
+                        if (e.target.value.length >= 3) {
+                          searchAssetInMarket(e.target.value);
+                        }
+                      }}
+                      className="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white placeholder:text-slate-600 transition-all font-mono font-bold tracking-widest text-lg"
                     />
                     <div className="absolute right-4 top-1/2 -translate-y-1/2">
-                      {isFetchingPrice ? (
+                      {isSearchingMarketAsset || isFetchingPrice ? (
                         <Loader2 className="animate-spin text-emerald-400" size={20} />
                       ) : (
                         <Search 
                           className="text-slate-500 cursor-pointer hover:text-emerald-400 transition-colors" 
                           size={20} 
-                          onClick={() => fetchCurrentPrice(formData.ticker)}
+                          onClick={() => searchAssetInMarket(formData.ticker)}
                         />
                       )}
                     </div>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-6">
+
+                <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Quantidade</label>
+                    <label className="text-[10px] uppercase font-black text-slate-400 tracking-[0.2em] ml-1">Quantidade</label>
                     <input 
                       required
                       type="number" 
                       placeholder="0"
                       value={formData.quantity || ''}
                       onChange={(e) => setFormData({...formData, quantity: Number(e.target.value)})}
-                      className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white font-bold text-lg"
+                      className="w-full px-4 py-3.5 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white font-bold text-lg"
                     />
                   </div>
                   <div className="space-y-2">
-                    <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Preço Médio</label>
+                    <div className="flex justify-between items-center mr-1">
+                      <label className="text-[10px] uppercase font-black text-slate-400 tracking-[0.2em] ml-1">Preço Médio</label>
+                      <button
+                        type="button"
+                        onClick={() => fetchCurrentPrice(formData.ticker)}
+                        disabled={!formData.ticker || formData.ticker.length < 3 || isFetchingPrice}
+                        className="text-[10px] uppercase font-bold text-emerald-400 hover:text-emerald-300 disabled:text-slate-600 transition-colors flex items-center gap-1"
+                        title="Buscar preço atual no mercado financeiro na internet"
+                      >
+                        {isFetchingPrice ? "..." : "Buscar 🌐"}
+                      </button>
+                    </div>
                     <div className="relative">
-                      <span className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-500 font-bold">R$</span>
+                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 font-bold text-sm">R$</span>
                       <input 
                         required
                         step="0.01"
@@ -1852,18 +2305,48 @@ export default function App() {
                         placeholder="0,00"
                         value={formData.avgPrice || ''}
                         onChange={(e) => setFormData({...formData, avgPrice: Number(e.target.value)})}
-                        className="w-full pl-12 pr-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white font-bold text-lg"
+                        className="w-full pl-11 pr-4 py-3.5 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white font-bold text-lg font-mono focus:border-emerald-500/30"
                       />
                     </div>
                   </div>
                 </div>
+
+                {formData.avgPrice > 0 && (
+                  <div className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 space-y-1.5 animate-in fade-in zoom-in-95 duration-200">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-xs">
+                        <Globe size={14} className="animate-pulse" />
+                        <span>{marketSearchResult?.name || `${formData.ticker} - Mercado Financeiro`}</span>
+                      </div>
+                      <span className="text-[10px] bg-emerald-500/20 text-emerald-300 font-mono px-2 py-0.5 rounded font-bold">
+                        {marketSearchResult?.source || "Cotação em Tempo Real"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1 border-t border-emerald-500/10">
+                      <span className="text-[11px] text-slate-400">Preço atual de mercado:</span>
+                      <div className="flex items-center gap-2">
+                        {marketSearchResult?.variation24h !== undefined && (
+                          <span className={`text-[10px] font-bold font-mono px-1.5 py-0.5 rounded ${
+                            marketSearchResult.variation24h >= 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'
+                          }`}>
+                            {marketSearchResult.variation24h >= 0 ? '+' : ''}{marketSearchResult.variation24h}% 24h
+                          </span>
+                        )}
+                        <span className="text-sm font-mono font-black text-white bg-slate-950 px-2.5 py-1 rounded-lg border border-white/10">
+                          {marketSearchResult?.currency === 'USD' ? '$' : 'R$'} {formData.avgPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-2">
-                  <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Tipo de Classe</label>
+                  <label className="text-[10px] uppercase font-black text-slate-400 tracking-[0.2em] ml-1">Tipo de Classe</label>
                   <div className="relative">
                     <select 
                       value={formData.type}
                       onChange={(e) => setFormData({...formData, type: e.target.value})}
-                      className="w-full px-5 py-4 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white font-bold appearance-none cursor-pointer"
+                      className="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl focus:outline-none focus:ring-2 focus:ring-emerald-500/50 text-white font-bold appearance-none cursor-pointer"
                     >
                       <option className="bg-slate-900">Ação (B3)</option>
                       <option className="bg-slate-900">FII (Fundo Imob.)</option>
@@ -1873,36 +2356,40 @@ export default function App() {
                     <ChevronRight size={18} className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
                   </div>
                 </div>
-                <button 
-                  type="submit"
-                  className="w-full bg-emerald-500 text-slate-950 py-5 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-emerald-500/20 hover:bg-emerald-400 hover:-translate-y-0.5 active:scale-95 transition-all flex items-center justify-center gap-3"
-                >
-                  Cadastrar Ativo
-                  <ChevronRight size={20} />
-                </button>
+
+                {/* Sticky / Prominently Positioned Submit Button */}
+                <div className="pt-3 sticky bottom-0 bg-slate-900/95 backdrop-blur-md pb-1 mt-auto shrink-0 border-t border-white/5">
+                  <button 
+                    type="submit"
+                    className="w-full bg-emerald-500 text-slate-950 py-4 rounded-2xl font-black text-base shadow-xl shadow-emerald-500/20 hover:bg-emerald-400 hover:scale-[1.01] active:scale-95 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <span>Confirmar e Incluir Ativo</span>
+                    <Plus size={20} />
+                  </button>
+                </div>
               </form>
             </motion.div>
           </div>
         )}
 
         {isAddingAlert && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsAddingAlert(false)}
-              className="absolute inset-0 bg-slate-950/60 backdrop-blur-md"
+              className="fixed inset-0 bg-slate-950/70 backdrop-blur-md"
             />
             <motion.div 
               initial={{ scale: 0.95, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 20 }}
-              className="relative w-full max-w-md bg-slate-900 border border-white/10 rounded-[2.5rem] shadow-2xl overflow-hidden shadow-emerald-500/5"
+              className="relative w-full max-w-md bg-slate-900 border border-white/10 rounded-[2.5rem] shadow-2xl shadow-emerald-500/5 flex flex-col max-h-[90vh] overflow-hidden my-auto z-10"
             >
-              <div className="p-8 border-b border-white/5 flex justify-between items-center bg-white/5">
+              <div className="p-6 sm:p-8 border-b border-white/5 flex justify-between items-center bg-white/5 shrink-0">
                 <h3 className="text-2xl font-bold text-white tracking-tight">Novo Alerta</h3>
-                <button onClick={() => setIsAddingAlert(false)} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-slate-400 hover:text-white transition-all">
+                <button onClick={() => setIsAddingAlert(false)} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-slate-400 hover:text-white transition-all shrink-0">
                   <X size={20} />
                 </button>
               </div>
@@ -1911,7 +2398,7 @@ export default function App() {
                   e.preventDefault();
                   handleAddAlert(alertForm);
                 }} 
-                className="p-8 space-y-6"
+                className="p-6 sm:p-8 space-y-5 overflow-y-auto flex-1 flex flex-col"
               >
                 <div className="space-y-2">
                   <label className="text-[10px] uppercase font-black text-slate-500 tracking-[0.2em] ml-1">Ativo para Alerta</label>
@@ -2019,6 +2506,170 @@ export default function App() {
                   <ChevronRight size={20} />
                 </button>
               </form>
+            </motion.div>
+          </div>
+        )}
+
+        {alertToDelete && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setAlertToDelete(null)}
+              className="absolute inset-0 bg-slate-950/60 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              className="relative w-full max-w-sm bg-slate-900 border border-white/10 rounded-[2.5rem] shadow-2xl overflow-hidden shadow-rose-500/5 p-8 text-center space-y-6"
+            >
+              <div className="flex justify-center">
+                <div className="w-16 h-16 bg-rose-500/10 text-rose-400 rounded-full flex items-center justify-center border border-rose-500/20">
+                  <AlertCircle size={32} />
+                </div>
+              </div>
+              
+              <div className="space-y-2">
+                <h3 className="text-xl font-bold text-white tracking-tight">Excluir Alerta?</h3>
+                <p className="text-slate-400 text-sm">
+                  Tem certeza que deseja excluir o alerta de monitoramento para <strong className="text-white font-mono font-bold">{alertToDelete.ticker}</strong>?
+                </p>
+                {alertToDelete.type === 'price' && (
+                  <p className="text-slate-500 text-xs italic">
+                    Alerta de preço {alertToDelete.condition === 'above' ? 'acima de' : 'abaixo de'} R$ {alertToDelete.value?.toFixed(2)}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex gap-4 pt-2">
+                <button
+                  onClick={() => setAlertToDelete(null)}
+                  className="flex-1 py-3.5 bg-white/5 hover:bg-white/10 text-slate-300 font-bold rounded-2xl border border-white/5 active:scale-95 transition-all text-sm uppercase tracking-wider font-mono text-center"
+                >
+                  Não
+                </button>
+                <button
+                  onClick={() => {
+                    const newAlerts = alerts.filter(a => a.id !== alertToDelete.id);
+                    saveAlerts(newAlerts);
+                    setAlertToDelete(null);
+                  }}
+                  className="flex-1 py-3.5 bg-rose-500 hover:bg-rose-400 text-white font-bold rounded-2xl active:scale-95 transition-all text-sm uppercase tracking-wider font-mono shadow-lg shadow-rose-500/20 text-center"
+                >
+                  Sim
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+        {showCryptosModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowCryptosModal(false)}
+              className="absolute inset-0 bg-slate-950/60 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              className="relative w-full max-w-lg bg-slate-900 border border-white/10 rounded-[2.5rem] shadow-2xl overflow-hidden shadow-pink-500/5 flex flex-col max-h-[80vh]"
+            >
+              <div className="p-6 sm:p-8 border-b border-white/5 flex justify-between items-center bg-white/5 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-pink-500/10 text-pink-400 rounded-full flex items-center justify-center border border-pink-500/20">
+                    <TrendingUp size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+                      Criptos em Alta
+                      <span className="text-[10px] bg-pink-500/20 text-pink-300 font-mono px-2 py-0.5 rounded-full border border-pink-500/30 font-bold">
+                        Mercado Online 🌐
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-400">Ativos digitais com maior crescimento e variação em tempo real</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={fetchPositiveCryptos}
+                    disabled={isFetchingCryptos}
+                    className="p-2.5 rounded-full bg-white/5 hover:bg-white/10 text-pink-400 disabled:opacity-50 transition-all flex items-center justify-center"
+                    title="Atualizar cotações do mercado cripto agora"
+                  >
+                    <RefreshCw size={18} className={isFetchingCryptos ? "animate-spin" : ""} />
+                  </button>
+                  <button onClick={() => setShowCryptosModal(false)} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-slate-400 hover:text-white transition-all">
+                    <X size={20} />
+                  </button>
+                </div>
+              </div>
+              
+              <div className="p-8 overflow-y-auto space-y-4 relative">
+                {isFetchingCryptos ? (
+                  <div className="flex flex-col items-center justify-center py-12">
+                    <Loader2 className="animate-spin text-pink-400 mb-4" size={32} />
+                    <p className="text-slate-400 font-medium text-sm">Analisando o mercado cripto...</p>
+                  </div>
+                ) : (
+                  <>
+                    {positiveCryptos.length > 0 ? (
+                      <div className="space-y-3">
+                        {positiveCryptos.map((crypto, i) => (
+                          <div key={i} className="bg-white/5 border border-white/5 p-4 rounded-2xl flex items-center justify-between hover:bg-white/10 transition-colors">
+                            <div className="flex items-center gap-4 w-1/3">
+                              <div className="w-10 h-10 rounded-xl bg-pink-500/10 flex items-center justify-center font-bold text-pink-400 font-mono text-sm border border-pink-500/20 shrink-0">
+                                {crypto.ticker}
+                              </div>
+                              <div className="min-w-0">
+                                <h4 className="font-bold text-white truncate">{crypto.name}</h4>
+                                <p className="text-xs text-slate-400 font-mono truncate">USD {crypto.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}</p>
+                              </div>
+                            </div>
+                            
+                            <div className="flex-1 px-4 h-10 hidden sm:block">
+                              {crypto.evolution && crypto.evolution.length > 0 && (
+                                <ResponsiveContainer width="100%" height="100%">
+                                  <LineChart data={crypto.evolution.map((val, i) => ({ value: val, index: i }))}>
+                                    <Line type="monotone" dataKey="value" stroke="#34d399" strokeWidth={2} dot={false} isAnimationActive={true} />
+                                  </LineChart>
+                                </ResponsiveContainer>
+                              )}
+                            </div>
+
+                            <div className="flex flex-col items-end gap-1.5 w-1/3 sm:w-auto shrink-0">
+                              <span className="flex items-center gap-1 text-emerald-400 font-bold bg-emerald-500/10 px-2 py-1 rounded-md text-sm border border-emerald-500/20" title="Variação Diária">
+                                <TrendingUp size={14} />
+                                +{crypto.variation}% <span className="text-[10px] text-emerald-400/70 ml-0.5">24h</span>
+                              </span>
+                              {crypto.variation30m !== undefined && (
+                                <span className="flex items-center gap-1 text-pink-400 font-bold bg-pink-500/10 px-2 py-0.5 rounded-md text-xs border border-pink-500/20" title="Variação nos últimos 30 min">
+                                  <TrendingUp size={12} />
+                                  +{crypto.variation30m}% <span className="text-[10px] text-pink-400/70 ml-0.5">30m</span>
+                                </span>
+                              )}
+                              {crypto.variation24hAbs !== undefined && (
+                                <span className="flex items-center gap-1 text-emerald-400/80 font-bold bg-emerald-500/5 px-2 py-0.5 rounded-md text-[10px] border border-emerald-500/10" title="Variação Absoluta 24h">
+                                  +USD {crypto.variation24hAbs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-center py-12">
+                        <AlertCircle className="mx-auto text-slate-500 mb-4" size={32} />
+                        <p className="text-slate-400">Não encontramos destaques positivos no momento.</p>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             </motion.div>
           </div>
         )}
